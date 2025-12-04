@@ -9,3 +9,199 @@ output:
 header-includes:
   - \usepackage{xcolor}
 ---
+
+```{r}
+# Load datasets
+purchases <- read.csv("amazon-purchases.csv")
+survey <- read.csv("survey_train_test.csv")
+
+# Merge datasets on Survey Response ID
+data <- base::merge(purchases, survey, by = "Survey.ResponseID")
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width=7, fig.height=5)
+library(tidyverse)
+library(rpart)
+library(mlr3verse)
+library(ggplot2)
+library(xgboost)
+library(dplyr)
+
+```
+
+## Introduction 
+Research shows that factors such as income, age, gender, and household composition often influence spending behavior and product choice (U.S. Bureau of Labor Statistics). This background makes us interested to see if online spending is associated with variables such as income, education, age, and household sizes. The household size could be associated with how often and how many products are typically purchased but the different demographics of the customer or household could be associated with the purchase category. Personal habits and factors related to personal health could also place an influential role in purchasing behavior. These variables are all plausible predictors of online spending behavior.
+
+## Exploratory Data Analysis
+As we explored potential relationships between the variables, notable patterns were discovered and some failed to showed. Our findings are presented below: 
+
+#### Correlation Matrix
+```{r, fig.width=10, fig.height=6}
+# Select numeric variables
+numeric_data <- data %>%
+  select(Purchase.Price.Per.Unit, Quantity, Q.amazon.use.howmany, 
+         Q.amazon.use.hh.size.num)
+
+# Convert columns to numeric
+numeric_data <- numeric_data %>%
+  mutate(Q.amazon.use.howmany = as.numeric(Q.amazon.use.howmany))
+
+# Compute correlation matrix
+cor_matrix <- cor(numeric_data, use = "pairwise.complete.obs")
+
+# Convert to long format for ggplot
+cor_long <- as.data.frame(as.table(cor_matrix))
+
+ggplot(cor_long, aes(Var1, Var2, fill = Freq)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "darkgreen", high = "pink", mid = "white",
+                       midpoint = 0, limit = c(-1,1), space = "Lab",
+                       name = "Correlation") +
+  geom_text(aes(label = round(Freq, 2)), color = "black", size = 4) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  labs(title = "Correlation Matrix Heatmap (Numeric Variables)", x = "", y = "")
+```
+From our correlation heat map, we notice that all the numerical variables do not show any kind of correlation among each other. Surprisingly the household size and the number of users per amazon account doesn't have any correlation to the amount of products purchased. The variable interactions seem to be statistically negligible in terms of a linear relationship. 
+
+#### Spending by Gender Across Age Groups
+```{r, fig.width=10, fig.height=6} 
+# Convert age ranges to numeric midpoints
+age_data <- data %>%
+  mutate(
+    q_demos_age = case_when(
+      Q.demos.age == "18 - 24 years" ~ (18 + 24)/2,
+      Q.demos.age == "25 - 34 years" ~ (25 + 34)/2,
+      Q.demos.age == "35 - 44 years" ~ (35 + 44)/2,
+      Q.demos.age == "45 - 54 years" ~ (45 + 54)/2,
+      Q.demos.age == "55 - 64 years" ~ (55 + 64)/2,
+      Q.demos.age == "65 and older" ~ 70, 
+      TRUE ~ NA_real_
+    )
+  )
+
+ggplot(data, aes(x = Q.demos.gender, y = Purchase.Price.Per.Unit * Quantity, fill = Q.demos.gender)) +
+  geom_boxplot() +
+  facet_wrap(~cut(age_data$q_demos_age, breaks=c(21.0,29.5,39.5,49.5,59.5, 70.0))) +
+  labs(title = "Spending by Gender Across Age Groups", x = "Gender", y = "Spending per Transaction")
+```
+After looking at how different genders and age ranges spend, we noticed the Male gender tends to have a a greater spread for spending in comparison to the Female, Other, and Prefer not to say categories. Although the Female category has the largest outlier value in two panels, we tend to see the larger outlier values more often in Males across all panels.
+
+#### Average Quantity Purchased by State
+```{r, fig.width=10, fig.height=6}
+ggplot(data, aes(x = Shipping.Address.State, y = Quantity)) +
+  stat_summary(fun = "mean", geom = "bar") +
+  labs(title = "Average Quantity Purchased by State",
+       x = "State", y = "Mean Quantity") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+Interesting in seeing if the state/location would show any noticeable patterns in the quantity of products purchased, our visual showed that the state doesn't seem to make a difference on the number of products purchased. This suggests that more populated states might not be very important to consider in our final model. 
+
+
+#### Quantity Purchased vs Cigarette Use in the Household
+```{r, fig.width=10, fig.height=6}
+ggplot(data, aes(x = Q.substance.use.cigarettes, y = Quantity, fill = Q.substance.use.cigarettes)) +
+  geom_boxplot() +
+  labs(title = "Quantity Purchased by Cigarette Use Behavior",
+       x = "Cigarette Use Category",
+       y = "Quantity Purchased per Transaction") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+It seems that customers that do not have cigarette users in the household has the most extreme and numerous high-quantity purchases. The non-smokers category shows the largest spread of outliers and indicates high variability in larger quantity purchases.
+
+
+#### Quantity Purchased Across Drug Use Levels
+```{r, fig.width=10, fig.height=6}
+behavior_data <- data %>%
+  select(Q.substance.use.cigarettes,
+         Q.substance.use.alcohol,
+         Q.substance.use.marijuana,
+         Quantity) %>%
+  pivot_longer(-Quantity, names_to = "Behavior", values_to = "Response")
+
+ggplot(behavior_data, aes(x = Response, y = Quantity, fill = Response)) +
+  geom_boxplot() +
+  facet_wrap(~Behavior, scales = "free_x") +
+  labs(
+    title = "Quantity Purchased Across Multiple Behavioral Factors",
+    x = "Response",
+    y = "Quantity"
+  ) +
+  theme_minimal()
+```
+After seeing the results of cigarette use in the household on the quantity purchased for items, we wanted to see if that pattern would be the same for other drug use variables. We notice that this was the case and the customers that did not use any drugs showed again as having the largest spread of outliers and indicate high variability in larger quantity purchases.
+
+
+### Total Spent Over Time
+```{r, fig.width=10, fig.height=6}
+# Prepare data
+date_data <- data %>%
+  mutate(Order.Date = as.Date(Order.Date), 
+         Total.Spent = Purchase.Price.Per.Unit * Quantity)
+
+# Create a Year-Month column
+date_data <- date_data %>%
+  mutate(YearMonth = format(Order.Date, "%Y-%m"))
+
+#Aggregate total spent per month
+spending_data <- date_data %>%
+  group_by(YearMonth) %>%
+  summarise(Monthly.Total = sum(Total.Spent))
+
+ggplot(spending_data, aes(x = YearMonth, y = Monthly.Total)) +
+  geom_bar(stat = "identity", fill = "pink", color = "black", alpha = 0.7) +
+  labs(title = "Total Spending per Month",
+       x = "Month", 
+       y = "Total Spent ($)") + 
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+Total monthly spending generally trended upwards from 2018 into 2023 but we also see a noticeable drop towards the end of 2023 and early 2024. Additionally, there seem to dips within the years of prices dropping which could represent seasonal effects like the holiday season. 
+
+```{r, fig.width=10, fig.height=6}
+#Prepare data
+date_data <- data %>%
+  mutate(Order.Date = as.Date(Order.Date),
+         Total.Spent = Purchase.Price.Per.Unit * Quantity,
+         Year = format(Order.Date, "%Y"),
+         YearMonth = format(Order.Date, "%Y-%m"))
+
+# Aggregate total spent per month
+spending_data <- date_data %>%
+  group_by(Year, YearMonth) %>%
+  summarise(Monthly.Total = sum(Total.Spent), .groups = "drop")
+
+# Select top 3 months per year
+top3_months <- spending_data %>%
+  group_by(Year) %>%
+  slice_max(Monthly.Total, n = 3) %>%
+  ungroup()
+
+ggplot(top3_months, aes(x = YearMonth, y = Monthly.Total, fill = Year)) +
+  geom_bar(stat = "identity", color = "black", alpha = 0.8) +
+  labs(title = "Top 3 Spending Months Per Year", 
+       x = "Month",
+       y = "Total Spent ($)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+As assumed from the previous plot, we believed the months that fall within the holiday season would present as the months where customers spent the most. Up until 2022, November and December are the most popular months that have a lot of spending happening which makes sense since these are the month that most individuals do their holiday shopping. Interestingly, 2023 and after doesn't show the same pattern.  
+
+## Preprocessing
+```{r}
+## Drop unnecessary columns 
+cols_to_drop <- c("Q.sell.YOUR.data", "Q.sell.consumer.data", "Q.small.biz.use", "Q.census.use", "Q.research.society", "test")
+survey <- survey %>% select(setdiff(colnames(survey), cols_to_drop))
+```
+
+
+
+## Candidate models / Model evaluation / Tuning
+
+
+
+## Final Model
+
+
+
