@@ -27,7 +27,7 @@ library(mlr3verse)
 library(ggplot2)
 library(xgboost)
 library(dplyr)
-
+library(rpart)
 ```
 
 ## Introduction 
@@ -183,26 +183,50 @@ ggplot(data, aes(x = Q.amazon.use.hh.size.num, fill = Q.demos.income)) +
   ) +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 0))
+```
+We assumed that larger household sizes would most likely make a larger income. We do see that household sizes of 4 or more frequently make an income within 100-150K but those that make 150K or more are not the most frequent income range to have large families. The same pattern is seen for household sizes of 2. The majority of those that are a household size of 1 had an income under 75K, which was expected. However, across all income ranges, those that had a household size of 3 had somewhat similar frequencies in their income ranges, and surprisingly, those making 50-75K was the most frequent. 
+
+
+```{r}
 
 ```
-We assumed that larger household sizes would most likely make a larger income. We do see that household sizes of 4 or more frequently make an income within 100-150K but those that make 150K or more are not the most frequent income range to have large families. The same pattern is seen for household sizes of 2. The majority of those that are a household size of 1 had an income under 75K, which was expected. However, across all income ranges, those that had a household size of 3 had somewhat similar frequencies in their income ranges, and surprisingly, those making 50-75K was the most frequent.  
+
+
 
 ## Preprocessing
 ```{r}
 ## Drop unnecessary columns 
 cols_to_drop <- c("Q.sell.YOUR.data", "Q.sell.consumer.data", "Q.small.biz.use", "Q.census.use", "Q.research.society", "test")
-survey <- survey %>% select(setdiff(colnames(survey), cols_to_drop))
+data <- data %>% select(setdiff(colnames(data), cols_to_drop))
+
+# Handle Missing Data
+imputation_pipeline <- gunion(list(
+  po("select", id = "sel_num", selector = selector_type("numeric")) %>>%
+    po("imputelearner", id = "imp_num", learner = lrn("regr.rpart")),
+  po("select", id = "sel_cat", selector = selector_type(c("factor","ordered"))) %>>%
+    po("imputelearner", id = "imp_cat", learner = lrn("classif.rpart")),
+  po("select", id = "sel_rest", 
+     selector = selector_invert(selector_type(c("numeric","factor","ordered"))))
+  )) %>>% 
+  po("featureunion")
+
+# Learner
+lrn_xgb <- as_learner(
+  imputation_pipeline %>>%
+    po("encode", method = "one-hot") %>>%
+    lrn("regr.xgboost")
+)
 ```
-The variables related to the usage of personal information did not feel relevant to our goal of being able to predict the household size of a customer using their purchasing behavior
-
-
-
-
-
+Before modeling, we performed a few preprocessing steps to ensure the survey and purchase datasets were clean and suitable for regression. First, we removed several variables that were irrelevant to prediction. The variables related to the usage of personal information did not feel relevant to our goal of being able to predict the household size of a customer using their purchasing behavior. By removing these predictors, it also helps us prevent overfitting from occurring. Since our dataset contains missing values, we decided to use rpart which can naturally handle missing values. In our pipeline, our numeric and categorical columns are separated, and then a regression and classification tree imputes the missing values respectively. Finally, we recombine all our features and have a clean dataset ready for modeling. 
 
 ## Candidate models / Model evaluation / Tuning
 ```{r}
-
+# Learner
+lrn_xgb <- as_learner(
+  imputation_pipeline %>>%
+    po("encode", method = "one-hot") %>>% ## one-hot encode our categorical variables.
+    lrn("regr.xgboost") ## pass cleaned dataset into an XGBoost regression model
+)
 ```
 
 
