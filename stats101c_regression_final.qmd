@@ -201,9 +201,12 @@ We assumed that larger household sizes would most likely make a larger income. W
 
 ## Preprocessing
 ```{r}
+save(data, file="data/regression/joined_data.RData")
 ## Drop unnecessary columns 
 cols_to_drop <- c("Q.sell.YOUR.data", "Q.sell.consumer.data", "Q.small.biz.use", "Q.census.use", "Q.research.society", "test")
 survey <- survey %>% select(setdiff(colnames(survey), cols_to_drop))
+
+
 ```
 
 The variables related to the usage of personal information did not feel relevant to our goal of being able to predict the household size of a customer using their purchasing behavior
