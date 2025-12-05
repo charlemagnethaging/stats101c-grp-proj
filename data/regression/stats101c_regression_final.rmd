@@ -23,11 +23,15 @@ data <- base::merge(purchases, survey, by = "Survey.ResponseID")
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width=7, fig.height=5)
 library(tidyverse)
 library(rpart)
+library(mlr3)
+library(mlr3learners)
 library(mlr3verse)
 library(ggplot2)
 library(xgboost)
 library(dplyr)
 library(rpart)
+library(broom)
+library(glmnet)
 ```
 
 ## Introduction 
@@ -62,8 +66,7 @@ ggplot(cor_long, aes(Var1, Var2, fill = Freq)) +
   theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
   labs(title = "Correlation Matrix Heatmap (Numeric Variables)", x = "", y = "")
 ```
-From our correlation heat map, we notice that all the numerical variables do not show any kind of correlation among each other. Surprisingly the household size and the number of users per amazon account doesn't have any correlation to the amount of products purchased. The variable interactions seem to be statistically negligible in terms of a linear relationship. 
-
+From our correlation heat map, we notice that all the numerical variables do not show any kind of correlation among each other. Surprisingly the amount of products purchased and the number of users per amazon account doesn't have any correlation to the household size. The variable interactions seem to be statistically negligible in terms of a linear relationship. 
 
 ```{r, fig.width=10, fig.height=6} 
 # Convert age ranges to numeric midpoints
@@ -97,7 +100,7 @@ ggplot(age_data, aes(x = Q.amazon.use.hh.size.num,
        y = "Spending per Transaction") +
   theme_minimal()
 ```
-After looking at how different household sizes and age ranges spend money, we noticed that all household sizes tend to have the same distribution of spending habits and those within the 25-34 range tend to spend the most. 
+After looking at how different household sizes and age ranges spend money, we noticed that all household sizes tend to have the same distribution of spending habits and those within the 25-34 range tend to spend the most and only as a household of 1. Similarly those within the 45-54 range also spend a lot for a household of 3. From this visual, age is definitely a strong predictor.
 
 ```{r, fig.width=10, fig.height=6}
 ggplot(data, aes(x = Shipping.Address.State, y = Q.amazon.use.hh.size.num)) +
@@ -141,34 +144,16 @@ ggplot(behavior_data, aes(x = Response, y = Q.amazon.use.hh.size.num, fill = Res
   ) +
   theme_minimal()
 ```
-After seeing the results of cigarette use in the household on the household size, we wanted to see if that pattern would be the same for other drug use variables. We notice that this was the case and the customers that did not use any drugs showed again as having the right skew trend of having larger families with a median of 2. Alcohol users had the same pattern as non-users but those that used marijuana showed had a smaller IQR that went up to a household size of 3. Across all panels, users that stopped drug use in the past still have the same observed results as the previous plot. Those who prefer to not say either had a median size of 2 or would have a right skewed distribution with the IQR going up to a size of 3. 
+After seeing the results of cigarette use in the household on the household size, we wanted to see if that pattern would be the same for other drug use variables. We notice that this was the case and the customers that did not use any drugs showed again as having the right skew trend of having larger families with a median of 2. Alcohol users had the same pattern as non-users but those that used marijuana showed had a smaller IQR that went up to a household size of 3. Across all panels, users that stopped drug use in the past still have the same observed results as the previous plot. Those who prefer to not say either had a median size of 2 or would have a right skewed distribution with the IQR going up to a size of 3. Based on this combined visual, none of the three drug use behaviors are strong predictors of housing size
 
 ```{r, fig.width=10, fig.height=6}
-par(mfrow = c(1, 2))  
-
-# Histogram for numeric reported housing size
-print(
-  ggplot(data, aes(x = Q.amazon.use.hh.size.num)) +
-    geom_histogram(bins = 20, fill = "skyblue", color = "black") +
-    labs(
-      title = "Distribution of Housing Size (Numeric)",
-      x = "Housing Size (Numeric)",
-      y = "Count"
-    ) +
-    theme_minimal()
-)
-
-# Bar chart for categorical reported housing size
-print(
-  ggplot(data, aes(x = Q.amazon.use.hh.size)) +
-    geom_bar(fill = "lightgreen", color = "black") +
-    labs(
-      title = "Distribution of Housing Size (Categorical)",
-      x = "Housing Size (Category)",
-      y = "Count"
-    ) +
-    theme_minimal()
-)
+ggplot(data, aes(x = Q.amazon.use.hh.size.num)) +
+  geom_histogram(bins = 20, fill = "skyblue", color = "black") +
+  labs(title = "Distribution of Housing Size (Numeric)",
+       x = "Housing Size (Numeric)",
+       y = "Count"
+       ) +
+  theme_minimal()
 ```
 Just looking at the distribution of housing sizes, we see that it's more common for households to have a size of 2, then 4+, and a size of 1 or 3 share the same frequency. Since household sizes of 4 and more are represented by only one variable, it's difficult to tell what the breakdown of household sizes are within that variable, but it's clear that having a large family, where large is defined by 4 or more, is more frequent than a family size of 1 or 3.   
 
@@ -186,48 +171,292 @@ ggplot(data, aes(x = Q.amazon.use.hh.size.num, fill = Q.demos.income)) +
 ```
 We assumed that larger household sizes would most likely make a larger income. We do see that household sizes of 4 or more frequently make an income within 100-150K but those that make 150K or more are not the most frequent income range to have large families. The same pattern is seen for household sizes of 2. The majority of those that are a household size of 1 had an income under 75K, which was expected. However, across all income ranges, those that had a household size of 3 had somewhat similar frequencies in their income ranges, and surprisingly, those making 50-75K was the most frequent. 
 
+```{r}
+# Top 10 most frequent categories
+N <- 10
+top_categories <- data %>%
+  count(Category, sort = TRUE) %>% 
+  slice_head(n = N) %>%            
+  pull(Category)                   
+
+top_categories_data <- data %>%
+  filter(Category %in% top_categories)
+
+summary_categories <- top_categories_data %>%
+  group_by(Category) %>%
+  summarize(
+    mean_size = mean(Q.amazon.use.hh.size.num, na.rm = TRUE),
+    se = sd(Q.amazon.use.hh.size.num, na.rm = TRUE) / sqrt(n())
+  )
+
+ggplot(summary_categories, aes(x = reorder(Category, mean_size), y = mean_size)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = mean_size - 1.96*se,
+                    ymax = mean_size + 1.96*se),
+                width = 0.2) +
+  coord_flip() +
+  labs(
+    title = "Mean Housing Size by Most Common Product Categories",
+    x = "Product Categories",
+    y = "Mean Housing Size"
+  )
+```
+Certain households would be more likely to purchase products from specific product categories like households with children would be like to purchase products related to toys. Looking at the top 10 purchased product categories, household sizes closer to 3 purchase from these categories, but we noticed that the pet food category showed a household size closer to 2. This makes us believe that there could be certain categories that may be able to predict smaller household sizes better than others. 
 
 ```{r}
+ggplot(data, aes(x = Q.demos.hispanic, y = Q.amazon.use.hh.size.num, fill = Q.demos.hispanic)) +
+  geom_violin() +
+  labs(title = "Housing Size vs. Is Hispanic ",
+       x = "Is Hispanic? (Yes or No)",
+       y = "Housing Size") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+Interestingly, we noticed that if a household has a non-Hispanic origin, it's more common for the household size to 2 than any other size. This variable is worth investigating further. 
+
+```{r}
+ggplot(data, aes(x = Q.demos.race, y = Q.amazon.use.hh.size.num)) +
+  geom_boxplot() +
+  facet_wrap(~ Q.demos.race, scales = "free_x", nrow = 6) +
+  labs(title = "Housing Size vs. Race",
+       x = "Race",
+       y = "Housing Size") +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+```
+After seeing the distribution of household sizes when a household is Hispanic or not, we were interested to see if race would should any patterns and it definitely did. The distributions in household sizes by different races showed many different results which made it evident that race could be a strong predictor for our model. 
+
+```{r}
+ggplot(data, aes(x = Q.demos.gender, y = Q.amazon.use.hh.size.num)) +
+  geom_violin() +
+  labs(title = "Housing Size vs. Gender ",
+       x = "Gender",
+       y = "Housing Size") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+The demographic-related variables we've explored have shown to be useful predictors so we wanted to see if gender would show any patterns as well. However, the violin plots for "Female" and "Male" show their widest density at exactly the same points: at 2 and 3. The most common household sizes are identical for the two largest gender groups and the violin plots fail to show that one gender group's distribution is systematically larger or smaller than another's. Including gender in our model would likely add very little explanatory power. 
+
+```{r}
+ggplot(data, aes(x = Q.demos.gender, y = Q.amazon.use.hh.size.num, fill = Q.demos.income)) +
+  geom_boxplot() +
+  labs(title = "Housing Size vs. Gender ",
+       x = "Gender",
+       y = "Housing Size") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+We wanted to see if the interaction effect between gender and income would show anything different, and we were able to identify patterns of variation in household size. This told use that distribution of housing size is strongly affected by income regardless of gender and the predictive power of income is strong. 
+
+```{r}
+ggplot(data, aes(x = Q.sexual.orientation, y = Q.amazon.use.hh.size.num)) +
+  geom_violin() +
+  labs(title = "Housing Size vs. Sexual Orientation ",
+       x = "Sexual Orientation",
+       y = "Housing Size") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+Although gender did not show to have strong predictive power, sexual orientation may be a modest predictor. There is difference in the proportions of individuals at size 2 and 3 for the heterosexual and LGBTQ+ category, but this still tells us that the typical household size structure is very similar for these two groups so we would consider sexual orientation a weak predictor. There's also no clear shift where one entire distribution is significantly higher or lower than the others. 
+
+```{r}
+ggplot(data, aes(x = Q.demos.education, y = Q.amazon.use.hh.size.num)) +
+  geom_violin() +
+  labs(title = "Housing Size vs. Education Level ",
+       x = "Completed Education Level",
+       y = "Housing Size") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+The violin plot shows that the underlying distribution of raw data is nearly identical for most education levels. This lack of separation in the raw data distribution means that knowing someone's education level doesn't tell you much more about their typical household size. 
+
+```{r}
+ggplot(data, aes(x = Q.amazon.use.howmany, y = Q.amazon.use.hh.size.num)) +
+  geom_boxplot() +
+  labs(title = "Housing Size vs. Users per Account ",
+       x = "Users per Account",
+       y = "Housing Size") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+We see an upward trend of in the distribution of housing size as the number of users per account increases. Although accounts with 2 or more users have the same distribution. The shift in the central tendency of household size shows the ability to separate the data into two distinct groups with different medians and distributions. This makes us believe that a binary indicator of if the account is shared or not could be a potentially useful predictor. 
+
+```{r}
+ggplot(data, aes(x = Q.amazon.use.how.oft, y = Q.amazon.use.hh.size.num)) +
+  geom_boxplot() +
+  labs(title = "Housing Size vs. Order Frequency ",
+       x = "Order Frequency",
+       y = "Housing Size") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+The number of deliveries made per account appears to be a poor predictor of household size. We see different trend of in the distribution of housing size as the number of orders per month increases, however, accounts that deliver up to 10 times a month have the same median which make us hesitant about the usefulness of the variable since it may have poor predictive power for the majority of the data. There is still a median shift as order frequencies increase past 10 but the distribution for this group has a large overlap with the others.  
+
+```{r}
+life_data <- data %>%
+  select(Q.personal.diabetes,
+         Q.personal.wheelchair,
+         Q.amazon.use.hh.size.num) %>%
+  pivot_longer(
+    cols = c("Q.personal.diabetes", "Q.personal.wheelchair"),
+    names_to = "Behavior",
+    values_to = "Response"
+  )
+
+ggplot(life_data, aes(x = Response, y = Q.amazon.use.hh.size.num, fill = Response)) +
+  geom_boxplot() +
+  facet_wrap(~Behavior, scales = "free_x") +
+  labs(
+    title = "Housing Size Across Personal Factors",
+    x = "Response",
+    y = "Housing Size"
+  ) +
+  theme_minimal()
+```
+Both factors possess modest predictive power because they successfully create categorical groups where the typical median household size is different (2 vs. 3). However, they are not strong predictors because their IQRs still heavily overlap, meaning the distributions are not completely separated. 
+
+```{r}
+# Top 10 Life Changes
+top_life_changes <- data %>%
+  count(Q.life.changes) %>%
+  arrange(desc(n)) %>%
+  dplyr::slice(1:10) %>%      
+  pull(Q.life.changes)
+
+life_changes_data <- data %>%
+  filter(Q.life.changes %in% top_life_changes)
+
+summary_df <- life_changes_data %>%
+  group_by(Q.life.changes) %>%
+  summarize(
+    mean_size = mean(Q.amazon.use.hh.size.num, na.rm = TRUE),
+    se = sd(Q.amazon.use.hh.size.num, na.rm = TRUE) / sqrt(n())
+  )
+
+ggplot(summary_df, aes(x = reorder(Q.life.changes, mean_size), y = mean_size)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = mean_size - 1.96*se,
+                    ymax = mean_size + 1.96*se),
+                width = 0.2) +
+  coord_flip() +
+  labs(
+    title = "Mean Housing Size by Most Common Life Changes",
+    x = "Life Change",
+    y = "Mean Housing Size"
+  )
+```
+The life changes variable would be useful for prediction, as several categories show a clear stratification of the means. Our model can leverage the fact that people who moved or lost a job tend to have smaller average household sizes than those who had a child or got divorced.
+
+```{r}
+date_data <- data %>%
+  mutate(
+    Order.Date = as.Date(Order.Date),         
+    Year = format(Order.Date, "%Y"),
+    Month = format(Order.Date, "%m")
+  )
+
+date_data %>%
+  group_by(Year, Month) %>%
+  summarise(mean_housing = mean(Q.amazon.use.hh.size.num, na.rm = TRUE)) %>%
+  ggplot(aes(x = Month, y = mean_housing, color = Year, group = Year)) +
+  geom_line(size = 1) +
+  geom_point() +
+  labs(
+    title = "Monthly Trends in Housing Size by Year",
+    x = "Month",
+    y = "Average Housing Size"
+  ) +
+  theme_minimal()
 
 ```
+After analyzing the average housing size by month and year, the order date variable does not appear to make a significant difference in the average household size. The average housing size across all years remains extremely stable throughout the months and there are no major seasonal spikes or drops where the average housing size changes significantly.
+
 
 
 
 ## Preprocessing
 ```{r}
 ## Drop unnecessary columns 
-cols_to_drop <- c("Q.sell.YOUR.data", "Q.sell.consumer.data", "Q.small.biz.use", "Q.census.use", "Q.research.society", "test")
+cols_to_drop <- c("Survey.ResponseID", "Order.Date", "Shipping.Address.State","Title",
+                  "ASIN.ISBN..Product.Code.", "Q.demos.education", "Q.demos.gender", 
+                  "Q.sexual.orientation", "Q.demos.state", "Q.amazon.use.hh.size", 
+                  "Q.amazon.use.how.oft", "Q.substance.use.cigarettes", 
+                  "Q.substance.use.marijuana", "Q.substance.use.alcohol", 
+                  "Q.personal.diabetes",  "Q.personal.wheelchair", 
+                  "Q.sell.YOUR.data", "Q.sell.consumer.data", "Q.small.biz.use", 
+                  "Q.census.use", "Q.research.society", "test")
 data <- data %>% select(setdiff(colnames(data), cols_to_drop))
+
+# Create binary variable for shared accounts
+data <- data %>%
+  mutate(
+    sharedAccount = case_when(
+      is.na(Q.amazon.use.howmany) ~ NA, # keep NA as NA
+      grepl("^1", Q.amazon.use.howmany) ~ FALSE, # anything starting with 1 is FALSE
+      TRUE ~ TRUE # all other values are TRUE
+    )
+  )
+
+# Drop Q.amazon.use.howmany column
+data <- data %>% select(setdiff(colnames(data), "Q.amazon.use.howmany"))
+
+## Keep only rows where Category is in the top 500 most frequent categories
+freq <- sort(table(data$Category), decreasing = TRUE)
+top_categories <- names(freq)[1:500]
+data <- subset(data, Category %in% top_categories)
+
+# Convert all character and logical variables to factors
+data <- data %>%
+  mutate(across(where(is.character), as.factor),
+         across(where(is.logical), as.factor))
 
 # Handle Missing Data
 imputation_pipeline <- gunion(list(
+  # numeric features: regression tree imputation
   po("select", id = "sel_num", selector = selector_type("numeric")) %>>%
     po("imputelearner", id = "imp_num", learner = lrn("regr.rpart")),
+  
+  # factor / ordered features:classification tree imputation
   po("select", id = "sel_cat", selector = selector_type(c("factor","ordered"))) %>>%
     po("imputelearner", id = "imp_cat", learner = lrn("classif.rpart")),
-  po("select", id = "sel_rest", 
-     selector = selector_invert(selector_type(c("numeric","factor","ordered"))))
-  )) %>>% 
+  
+  # everything else (IDs, dates, etc.) just passed through
+  po("select", id = "sel_rest", selector = selector_invert(selector_type(c("numeric","factor","ordered"))))
+  )) %>>%
   po("featureunion")
 
-# Learner
-lrn_xgb <- as_learner(
-  imputation_pipeline %>>%
-    po("encode", method = "one-hot") %>>%
-    lrn("regr.xgboost")
-)
-```
-Before modeling, we performed a few preprocessing steps to ensure the survey and purchase datasets were clean and suitable for regression. First, we removed several variables that were irrelevant to prediction. The variables related to the usage of personal information did not feel relevant to our goal of being able to predict the household size of a customer using their purchasing behavior. By removing these predictors, it also helps us prevent overfitting from occurring. Since our dataset contains missing values, we decided to use rpart which can naturally handle missing values. In our pipeline, our numeric and categorical columns are separated, and then a regression and classification tree imputes the missing values respectively. Finally, we recombine all our features and have a clean dataset ready for modeling. 
-
-## Candidate models / Model evaluation / Tuning
-```{r}
-# Learner
+# Create learner
 lrn_xgb <- as_learner(
   imputation_pipeline %>>%
     po("encode", method = "one-hot") %>>% ## one-hot encode our categorical variables.
     lrn("regr.xgboost") ## pass cleaned dataset into an XGBoost regression model
 )
 ```
+Before modeling, we performed a few preprocessing steps to ensure the survey and purchase datasets were clean and suitable for regression. First, we removed several variables that were irrelevant to prediction. The variables related to the usage of personal information and the customers' survey identification number did not feel relevant to our goal of being able to predict the household size of a customer using their purchasing behavior. However, we will make another subset of data including the customers' survey identification number for a generative additive model to account for subject variance later on. From our EDA, we were able to decide that the shipping address state, order date, product-specific information, education level, gender, sexual orientation, order frequency, substance use, and personal health-related variables are not helpful for making our prediction. By removing these predictors, it also helps us prevent overfitting from occurring.
+
+
+We still have the product category variable still to identify different products which we believe would also be more representative of different products. Since there are a lot of potential responses for this variable, we will limit the amount to the top 500 categories to make our modeling process less expensive. Additionally, we have decided the convert the Q.amazon.use.howmany variable into a binary indicator called "Shared_Account" to indicate whether a customer's account is shared by others or is used be a single person. 
+
+Since our dataset contains missing values, we decided to use rpart which can naturally handle missing values. In our pipeline, our numeric and categorical columns are separated, and then a regression and classification tree imputes the missing values respectively. Finally, we recombine all our features and have a clean dataset ready for modeling. 
+
+## Candidate models / Model evaluation / Tuning
+```{r}
+# defining the task
+housing_tsk <- as_task_regr(data, target = "Q.amazon.use.hh.size.num")
+```
+
+```{r}
+## K FOLD CROSS VALIDATION
+
+# resampling strategy
+cv_5fold <- rsmp("cv", folds = 5) 
+
+# defining the learner
+lrn_lm <- as_learner(
+  imputation_pipeline %>>%
+    po("encode", method = "one-hot") %>>% ## one-hot encode our categorical variables
+    lrn("regr.lm") ## pass cleaned dataset into a linear regression model
+)
+
+# set seed for reproducibility
+#set.seed(101) 
+#rr1 <- resample(task = housing_tsk, learner = lrn_lm, resampling = cv_5fold)
+#rr1$aggregate(measures = msrs(c("time_train", "time_predict", "time_both", "regr.mse")))
+```
+
 
 
 
