@@ -1,7 +1,13 @@
-## Dropping Duplicate Variables 
-duplicates <- 
+## Dropping Duplicate or Similar Variables 
+duplicates <-  c("Title", "ASIN.ISBN..Product.Code.",
+                 "Q.demos.state", "Q.amazon.use.hh.size")
+data <- data %>% select(setdiff(colnames(data), duplicates))
+
+## Variables Related to Selling Data Questions 
+selling_variables <- c("Q.sell.YOUR.data", "Q.sell.consumer.data", "Q.small.biz.use", 
+                       "Q.census.use", "Q.research.society", "test")
   
-  ## Create an encoded binary variable for shared accounts
+## Create an Encoded Binary Variable Based on if shared accounts
   data <- data %>%
   mutate(
     sharedAccount = case_when(
