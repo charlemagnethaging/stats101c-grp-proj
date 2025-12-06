@@ -3,11 +3,12 @@ title: "Stats 101C Regression Final"
 author: "Group 13"
 date: "`r Sys.Date()`"
 output:
-  pdf_document:
-    latex_engine: xelatex
-  html_document: default
-header-includes:
-  - \usepackage{xcolor}
+  pdf:
+    toc: true
+    toc_depth: 3
+  html:
+    toc: true
+    toc_depth: 3
 embed-resources: true
 ---
 
@@ -15,17 +16,10 @@ embed-resources: true
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width=7, fig.height=5)
 library(tidyverse)
 library(rpart)
-library(mlr3)
-library(mlr3learners)
 library(mlr3verse)
-library(mlr3pipelines)
-library(ggplot2)
 library(xgboost)
-library(dplyr)
-library(rpart)
 library(broom)
 library(glmnet)
-library(stringr)
 ```
 
 ```{r}
@@ -42,8 +36,10 @@ As we explored potential relationships between the variables, notable patterns w
 ### Response (HH Size) Distribution
 
 ```{r, fig.width=10, fig.height=6}
-ggplot(data, aes(x = q.amazon.use.hh.size.num)) +
-  geom_histogram(bins = 20, fill = "skyblue", color = "black") +
+data <- data |> drop_na(q.amazon.use.hh.size)
+
+ggplot(data, aes(x = q.amazon.use.hh.size)) +
+  geom_bar(fill = "blue", na.rm=TRUE) +
   labs(title = "Distribution of Housing Size (Numeric)",
        x = "Housing Size (Numeric)",
        y = "Count"

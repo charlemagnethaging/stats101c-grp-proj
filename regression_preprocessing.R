@@ -1,11 +1,132 @@
-## Load libraries
 library(tidyverse)
-library(mlr3verse)
+library(rpart)
+library(janitor)
 
-## Load data
-load("data/regression/joined_data.RData")
+# Load datasets
+purchases <- read_csv("data/regression/amazon-purchases.csv")
+survey <- read_csv("data/regression/survey_train_test.csv")
 
-## Dropping Duplicate or Similar Variables
+purchases <- purchases |> clean_names(sep_out=".")
+survey <- survey |> clean_names(sep_out=".")
+
+## Umbrella groups for the category variable
+purchases <- purchases %>%
+  mutate(
+    category = case_when(
+      str_detect(
+        category,
+        regex("BOOK|MUSIC|DVD", ignore_case = TRUE)
+      ) ~ "Media",
+      str_detect(
+        category,
+        regex("TOY|GAME|FIGURE|PUZZLE", ignore_case = TRUE)
+      ) ~ "Games",
+      str_detect(
+        category,
+        regex(
+          "SHIRT|PANTS|DRESS|SHORTS|SWIMWEAR|SWEATER|SWEATSHIRT|BRA|UNDERPANTS|PAJAMAS|TUNIC|LEOTARD|ONE_PIECE_OUTFIT|APPAREL",
+          ignore_case = TRUE
+        )
+      ) ~ "Clothing",
+      str_detect(category, regex("PET|ANIMAL", ignore_case = TRUE)) ~ "Pet",
+      str_detect(
+        category,
+        regex(
+          "FOOD|SNACK|COFFEE|TEA|JUICE|MILK|BREAD|CHOCOLATE|SAUCE|SUGAR|NOODLE|RICE|PASTRY",
+          ignore_case = TRUE
+        )
+      ) ~ "Food",
+      str_detect(
+        category,
+        regex(
+          "BEAUTY|SKIN|HAIR|COSMETIC|FRAGRANCE|LIP|MASCARA|NAIL",
+          ignore_case = TRUE
+        )
+      ) ~ "Beauty",
+      str_detect(
+        category,
+        regex(
+          "ELECTRONIC|PHONE|HEADPHONES|CAMERA|MONITOR|FLASH|COMPUTER|TABLET|ACCESSORY|INPUT|DEVICE|DRIVE",
+          ignore_case = TRUE
+        )
+      ) ~ "Electronics",
+      str_detect(
+        category,
+        regex(
+          "HOME|FURNITURE|LAMP|LIVING|DECOR|BED|BATH|KITCHEN|STORAGE|CLEANING|APPLIANCE|TOOL|LIGHT",
+          ignore_case = TRUE
+        )
+      ) ~ "Home",
+      str_detect(
+        category,
+        regex("SPORT|EXERCISE|FITNESS|RECREATION", ignore_case = TRUE)
+      ) ~ "Fitness",
+      str_detect(
+        category,
+        regex(
+          "HEALTH|MEDICATION|SUPPLEMENT|VITAMIN|THERMOMETER|ORTHOPEDIC|PROTECTOR",
+          ignore_case = TRUE
+        )
+      ) ~ "Health",
+      str_detect(
+        category,
+        regex(
+          "STATIONERY|PAPER|MARKING|INK|PEN|WRITING|NOTEBOOK",
+          ignore_case = TRUE
+        )
+      ) ~ "Stationery",
+      TRUE ~ "Other"
+    )
+  )
+
+# flatten purchases to one row per ID???
+
+purchases <- purchases |>
+  select(!c(title, asin.isbn.product.code)) 
+
+purchases <- purchases |> 
+  group_by(survey.response.id, order.date) |> 
+  summarize(
+    order.price = sum(purchase.price.per.unit*quantity)
+  ) |> 
+  group_by(survey.response.id) |> 
+  summarize(
+    total.spent = sum(order.price),
+    avg.order.price = mean(order.price),
+
+  ) |> 
+  ungroup()
+
+
+
+
+
+# Full join datasets on Survey Response ID
+data <- full_join(
+  purchases,
+  survey,
+  by = join_by(`Survey ResponseID` == Survey.ResponseID)
+)
+
+## rename variables to lower.case.dot.space
+
+data <- data |>
+  clean_names(sep_out=".")
+
+## Add numeric variable for numeric factors
+
+data <- data |>
+  mutate(
+    q.amazon.use.howmany = factor(q.amazon.use.howmany, ordered = TRUE),
+    q.amazon.use.hh.size = factor(q.amazon.use.hh.size, ordered = TRUE)
+  ) |>
+  mutate(
+    q.amazon.use.howmany.num = as.numeric(q.amazon.use.howmany),
+    .after = q.amazon.use.howmany
+  )
+
+
+## Dropping Duplicate and Redundant Variables
 # Note: Input names updated to lower case matches
 duplicates <- c(
   "title",
