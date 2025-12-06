@@ -10,15 +10,6 @@ header-includes:
   - \usepackage{xcolor}
 ---
 
-```{r}
-# Load datasets
-purchases <- read.csv("amazon-purchases.csv")
-survey <- read.csv("survey_train_test.csv")
-
-# Merge datasets on Survey Response ID
-data <- base::merge(purchases, survey, by = "Survey.ResponseID")
-```
-
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width=7, fig.height=5)
 library(tidyverse)
@@ -26,12 +17,23 @@ library(rpart)
 library(mlr3)
 library(mlr3learners)
 library(mlr3verse)
+library(mlr3pipelines)
 library(ggplot2)
 library(xgboost)
 library(dplyr)
 library(rpart)
 library(broom)
 library(glmnet)
+library(stringr)
+```
+
+```{r}
+# Load datasets
+purchases <- read.csv("amazon-purchases.csv")
+survey <- read.csv("survey_train_test.csv")
+
+# Merge datasets on Survey Response ID
+data <- base::merge(purchases, survey, by = "Survey.ResponseID")
 ```
 
 ## Introduction 
@@ -360,11 +362,8 @@ date_data %>%
     y = "Average Housing Size"
   ) +
   theme_minimal()
-
 ```
 After analyzing the average housing size by month and year, the order date variable does not appear to make a significant difference in the average household size. The average housing size across all years remains extremely stable throughout the months and there are no major seasonal spikes or drops where the average housing size changes significantly.
-
-
 
 
 ## Preprocessing
@@ -380,30 +379,129 @@ cols_to_drop <- c("Survey.ResponseID", "Order.Date", "Shipping.Address.State","T
                   "Q.census.use", "Q.research.society", "test")
 data <- data %>% select(setdiff(colnames(data), cols_to_drop))
 
-# Create binary variable for shared accounts
+## Create an encoded binary variable for shared accounts
 data <- data %>%
   mutate(
     sharedAccount = case_when(
-      is.na(Q.amazon.use.howmany) ~ NA, # keep NA as NA
-      grepl("^1", Q.amazon.use.howmany) ~ FALSE, # anything starting with 1 is FALSE
-      TRUE ~ TRUE # all other values are TRUE
+      # keep NA as NA
+      is.na(Q.amazon.use.howmany) ~ NA, 
+      
+      # anything starting with 1 is FALSE
+      grepl("^1", Q.amazon.use.howmany) ~ 0, 
+      
+      # all other values are TRUE
+      TRUE ~ 1 
     )
   )
 
-# Drop Q.amazon.use.howmany column
-data <- data %>% select(setdiff(colnames(data), "Q.amazon.use.howmany"))
+# Drop rows where the Category column is an empty string ("")
+data <- subset(data, Category != "")
 
 ## Keep only rows where Category is in the top 500 most frequent categories
 freq <- sort(table(data$Category), decreasing = TRUE)
 top_categories <- names(freq)[1:500]
 data <- subset(data, Category %in% top_categories)
 
-# Convert all character and logical variables to factors
+## Umbrella groups for the Category variable
+data <- data %>%
+  mutate(Category = case_when(
+    str_detect(Category, 
+               regex("BOOK|MUSIC|DVD", ignore_case = TRUE)) ~ "Media",
+    str_detect(Category, 
+               regex("TOY|GAME|FIGURE|PUZZLE", ignore_case = TRUE)) ~ "Games",
+    str_detect(Category, 
+               regex("SHIRT|PANTS|DRESS|SHORTS|SWIMWEAR|SWEATER|SWEATSHIRT|BRA|UNDERPANTS|PAJAMAS|TUNIC|LEOTARD|ONE_PIECE_OUTFIT|APPAREL", ignore_case = TRUE)) ~ "Clothing",
+    str_detect(Category, 
+               regex("PET|ANIMAL", ignore_case = TRUE)) ~ "Pet",
+    str_detect(Category, 
+               regex("FOOD|SNACK|COFFEE|TEA|JUICE|MILK|BREAD|CHOCOLATE|SAUCE|SUGAR|NOODLE|RICE|PASTRY", ignore_case = TRUE)) ~ "Food",
+    str_detect(Category, 
+               regex("BEAUTY|SKIN|HAIR|COSMETIC|FRAGRANCE|LIP|MASCARA|NAIL", ignore_case = TRUE)) ~ "Beauty",
+    str_detect(Category, 
+               regex("ELECTRONIC|PHONE|HEADPHONES|CAMERA|MONITOR|FLASH|COMPUTER|TABLET|ACCESSORY|INPUT|DEVICE|DRIVE", ignore_case = TRUE)) ~ "Electronics",
+    str_detect(Category, 
+               regex("HOME|FURNITURE|LAMP|LIVING|DECOR|BED|BATH|KITCHEN|STORAGE|CLEANING|APPLIANCE|TOOL|LIGHT", ignore_case = TRUE)) ~ "Home",
+    str_detect(Category, 
+               regex("SPORT|EXERCISE|FITNESS|RECREATION", ignore_case = TRUE)) ~ "Fitness",
+    str_detect(Category, 
+               regex("HEALTH|MEDICATION|SUPPLEMENT|VITAMIN|THERMOMETER|ORTHOPEDIC|PROTECTOR", ignore_case = TRUE)) ~ "Health",
+    str_detect(Category, 
+               regex("STATIONERY|PAPER|MARKING|INK|PEN|WRITING|NOTEBOOK", ignore_case = TRUE)) ~ "Stationery",
+    TRUE ~ "Other"
+  ))
+
+## Hot encoding for the multiple choice Life Changes variable 
+data <- data %>%
+  mutate(
+    # create multi-hot encoded columns
+    change_employment  = ifelse(str_detect(Q.life.changes, regex("Lost a job", ignore_case = TRUE)), 1, 0),
+    change_relocation  = ifelse(str_detect(Q.life.changes, regex("Moved place of residence", ignore_case = TRUE)), 1, 0),
+    change_relationship = ifelse(str_detect(Q.life.changes, regex("Divorce", ignore_case = TRUE)), 1, 0),
+    change_family      = ifelse(str_detect(Q.life.changes, regex("Became pregnant|Had a child", ignore_case = TRUE)), 1, 0),
+    # No categories selected
+    change_none = ifelse(Q.life.changes == "", 1, 0)
+  )
+
+## 
+data <- data %>%
+  mutate(
+    race_white = ifelse(str_detect(Q.demos.race, regex("White|Caucasian", ignore_case = TRUE)), 1, 0),
+    race_black = ifelse(str_detect(Q.demos.race, regex("Black|African American", ignore_case = TRUE)), 1, 0),
+    race_asian = ifelse(str_detect(Q.demos.race, 
+                                   regex("Asian", ignore_case = TRUE)), 1, 0),
+    race_native_american = ifelse(str_detect(Q.demos.race, 
+                                   regex("American Indian|Native American|Alaska Native", ignore_case = TRUE)), 1, 0),
+    race_pacific_islander = ifelse(str_detect(Q.demos.race, 
+                                   regex("Native Hawaiian|Pacific Islander",
+                                         ignore_case = TRUE)), 1, 0),
+    race_other = ifelse(str_detect(Q.demos.race, 
+                                   regex("Other", ignore_case = TRUE)), 1, 0)
+  )
+
+## Drop the columns we encoded
+data <- data %>% select(setdiff(colnames(data), c("Q.amazon.use.howmany", "Q.life.changes", "Q.demos.race")))
+
+
+## Converting categorical variables to their numeric midpoints
+data <- data %>%
+  mutate(
+    # Household income: numeric midpoints
+    Q.demos.income = case_when(
+      Q.demos.income == "Less than $25,000"       ~ 12500,
+      Q.demos.income == "$25,000 - $49,999"       ~ 37500,
+      Q.demos.income == "$50,000 - $74,999"       ~ 62500,
+      Q.demos.income == "$75,000 - $99,999"       ~ 87500,
+      Q.demos.income == "$100,000 - $149,999"     ~ 125000,
+      Q.demos.income == "$150,000 or more"        ~ 175000,
+      TRUE                                        ~ NA_real_
+    ),
+
+    # Age: numeric midpoints
+    Q.demos.age = case_when(
+      Q.demos.age == "18 - 24 years" ~ 21,
+      Q.demos.age == "25 - 34 years" ~ 30,
+      Q.demos.age == "35 - 44 years" ~ 40,
+      Q.demos.age == "45 - 54 years" ~ 50,
+      Q.demos.age == "55 - 64 years" ~ 60,
+      Q.demos.age == "65 and older"  ~ 70,
+      TRUE                           ~ NA_real_
+    )
+  )
+
+
+## Convert all character and logical variables to factors
 data <- data %>%
   mutate(across(where(is.character), as.factor),
          across(where(is.logical), as.factor))
+```
 
-# Handle Missing Data
+```{r}
+data
+```
+
+
+```{r, cache = TRUE}
+## Handle Missing Data
 imputation_pipeline <- gunion(list(
   # numeric features: regression tree imputation
   po("select", id = "sel_num", selector = selector_type("numeric")) %>>%
@@ -418,13 +516,28 @@ imputation_pipeline <- gunion(list(
   )) %>>%
   po("featureunion")
 
+## Encode Variables
+# impute variables
+full_pipeline <- imputation_pipeline %>>%
+  po("encode", method = "one-hot")
+# defining the task
+housing_tsk <- as_task_regr(data, target = "Q.amazon.use.hh.size.num")
+# train pipeline on the data
+full_pipeline$train(housing_tsk)
+# transform the data
+encoded_data <- as.data.frame(full_pipeline$predict(housing_tsk)$data())
+
 # Create learner
 lrn_xgb <- as_learner(
   imputation_pipeline %>>%
-    po("encode", method = "one-hot") %>>% ## one-hot encode our categorical variables.
-    lrn("regr.xgboost") ## pass cleaned dataset into an XGBoost regression model
+    ## one-hot encode our categorical variables
+    po("encode", method = "one-hot") %>>% 
+    
+    ## pass cleaned dataset into an XGBoost regression model
+    lrn("regr.xgboost") 
 )
 ```
+
 Before modeling, we performed a few preprocessing steps to ensure the survey and purchase datasets were clean and suitable for regression. First, we removed several variables that were irrelevant to prediction. The variables related to the usage of personal information and the customers' survey identification number did not feel relevant to our goal of being able to predict the household size of a customer using their purchasing behavior. However, we will make another subset of data including the customers' survey identification number for a generative additive model to account for subject variance later on. From our EDA, we were able to decide that the shipping address state, order date, product-specific information, education level, gender, sexual orientation, order frequency, substance use, and personal health-related variables are not helpful for making our prediction. By removing these predictors, it also helps us prevent overfitting from occurring.
 
 
@@ -432,13 +545,49 @@ We still have the product category variable still to identify different products
 
 Since our dataset contains missing values, we decided to use rpart which can naturally handle missing values. In our pipeline, our numeric and categorical columns are separated, and then a regression and classification tree imputes the missing values respectively. Finally, we recombine all our features and have a clean dataset ready for modeling. 
 
+```{r}
+data
+```
+```{r}
+#head(sort(table(data$Category), decreasing = TRUE), 10)
+```
+
+
 ## Candidate models / Model evaluation / Tuning
 ```{r}
 # defining the task
 housing_tsk <- as_task_regr(data, target = "Q.amazon.use.hh.size.num")
 ```
 
-```{r}
+```{r, cache=TRUE}
+## 70/30 SPLIT
+
+# set seed for reproducibility
+set.seed(101) 
+
+# randomly assign 70% of observations to train and 30% to test
+split <- partition(housing_tsk, ratio = 0.70)
+
+# define learner
+lrn_lm <- as_learner(
+  imputation_pipeline %>>%
+    po("encode", method = "one-hot") %>>% ## one-hot encode our categorical variables
+    lrn("regr.lm") ## pass cleaned dataset into a linear regression model
+)
+
+# train linear regression model on training data only
+lrn_lm$train(task = housing_tsk, row_ids = split$train)
+lrn_lm$model |> tidy()
+
+# predict test data only
+preds <- lrn_lm$predict(task = ames_tsk_small, row_ids = ames_split$test)
+
+# performance on test data
+preds$score(measures = msr("regr.mse"))
+```
+
+
+```{r, cache=TRUE}
 ## K FOLD CROSS VALIDATION
 
 # resampling strategy
@@ -452,9 +601,9 @@ lrn_lm <- as_learner(
 )
 
 # set seed for reproducibility
-#set.seed(101) 
-#rr1 <- resample(task = housing_tsk, learner = lrn_lm, resampling = cv_5fold)
-#rr1$aggregate(measures = msrs(c("time_train", "time_predict", "time_both", "regr.mse")))
+set.seed(101) 
+rr1 <- resample(task = housing_tsk, learner = lrn_lm, resampling = cv_5fold)
+rr1$aggregate(measures = msrs(c("time_train", "time_predict", "time_both", "regr.mse")))
 ```
 
 
