@@ -1,0 +1,112 @@
+---
+title: 'Reg Model Fitting'
+format: 'html'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+library(tidyverse)
+library(rpart)
+library(mlr3verse)
+library(xgboost)
+library(broom)
+library(glmnet)
+library(stringr)
+```
+
+# Feature Selection
+
+```{r}
+load("processed_data_train.RData")
+data_noid <- train_data |> select(-survey.response.id)
+mod_mat <- model.matrix(~ ., data = data_noid)
+tsk_hhsize <- as_task_regr(mod_mat, target = "q.amazon.use.hh.size.num")
+
+## choose filters
+
+# install.packages("FSelectorRcpp")
+# install.packages("praznik")
+# non importance-based filters
+flt_gain <- flt("information_gain")
+flt_perm <- flt("permutation", learner=lrn("regr.rpart"))
+
+flt_jmim <- flt("jmim")
+
+flt_gain$calculate(tsk_hhsize)
+as.data.table(flt_gain)
+
+flt_perm$calculate(tsk_hhsize)
+as.data.table(flt_perm)
+
+flt_jmim$calculate(tsk_hhsize)
+as.data.table(flt_jmim)[1:50]
+
+# importance filters
+flt_importance <- flt("importance")
+```
+
+## LASSO fit
+
+```{r}
+#| label: lasso
+load("processed_data_train.RData")
+# need to drop survey id so model matrix isn't crazy
+data_noid <- train_data |> select(-survey.response.id)
+
+# encode factor vars (destination state + q.demo.state)
+mod_mat <- model.matrix(~ ., data = data_noid)
+
+tsk_hhsize <- as_task_regr(mod_mat, target = "q.amazon.use.hh.size.num")
+tsk_hhsize
+lrn_lasso_cv <- lrn("regr.cv_glmnet", 
+  alpha = 1, 
+  nfolds = 10, 
+  s = "lambda.min", 
+  standardize = TRUE
+)
+lrn_lasso_cv$train(tsk_hhsize)
+
+lrn_lasso_cv$model
+coef(lrn_lasso_cv$model)
+```
+
+## Reg tree
+
+```{r}
+lrn_regtree <- lrn("regr.rpart")
+lrn_regtree$train(tsk_hhsize)
+lrn_regtree$model |> rpart.plot::rpart.plot()
+```
+
+## XGBoost init testing
+
+```{r}
+#| label: xgboost
+
+lrn_xgb <- lrn("regr.xgboost")
+lrn_xgb$train(tsk_hhsize) # mod_mat already encoded
+
+# var importance plot
+tibble(importance = lrn_xgb$importance(), var_name=names(lrn_xgb$importance())) |>
+    slice_max(importance, n=50) |> 
+    ggplot(aes(y=reorder(var_name, importance), x=importance)) +
+    geom_point()
+
+# test on unseen data comparing to featureless + lasso with benchmark
+set.seed(13)
+plan(multisession)
+cv_5fold <- rsmp("cv", folds=5)
+
+learners <- list(lrn("regr.featureless"), lrn_lasso_cv, lrn_regtree, lrn_xgb)
+
+bmr_design <- benchmark_grid(tasks=tsk_hhsize, learners = learners, cv_5fold)
+bmr_design
+bmr <- benchmark(bmr_design)
+bmr$aggregate(measures = msrs(c("regr.mse", "regr.rmse")))
+
+# here, xgb does worst... clearly we need to do some tuning
+```
+
+
+
+## GAM fitting
