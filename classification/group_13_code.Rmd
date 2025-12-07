@@ -1,0 +1,140 @@
+---
+title: "group_13_code"
+author: "Eddie He"
+date: "2025-12-06"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1) XGBoost Tuned Hyperparameters 2
+```{r}
+eta = exp(-4.31926)
+max_depth = 6
+colsample_bytree = 0.1388271	
+colsample_bylevel = 0.8524682	
+lambda = exp(-6.053344)
+alpha = exp(-0.9691479)
+subsample = 0.6763495	
+```
+
+XGBoost Tuned Hyper parameters 3
+```{r}
+params <- readRDS("xgb_best_params1.rds")
+eta = exp(-2.69948)
+max_depth = 8
+colsample_bytree = 0.4947548	
+colsample_bylevel = 0.4852609	
+lambda = exp( -5.854561)
+alpha = exp(4.692419)
+subsample =  0.7113682	
+```
+
+
+# 2) EDA and Preparation
+
+```{r, echo= FALSE}
+library(mlr3)
+library(mlr3pipelines)
+library(mlr3learners)
+library(mlr3tuning)
+library(paradox)
+
+train <- read.csv("SkinCancerTrain.csv")
+test <- read.csv("SkinCancerTestNoY.csv")
+
+
+imputation_pipeline <- gunion(list(
+    po("select", id = "sel_num", selector = selector_type("numeric")) %>>%
+      po("imputelearner", id = "imp_num", learner = lrn("regr.rpart")),
+    po("select", id = "sel_cat", selector = selector_type(c("factor","ordered"))) %>>%
+      po("imputelearner", id = "imp_cat", learner = lrn("classif.rpart")),
+    po("select", id = "sel_rest", selector = selector_invert(selector_type(c("numeric","factor","ordered"))))
+  )) %>>%
+    po("featureunion")
+
+int_vars <- names(train)[sapply(train, is.integer)] 
+train[int_vars] <- lapply(train[int_vars], as.numeric) #We need to convert all integer to numeric for our pipeline to work
+
+#Also convert all integer to numeric for the test data
+int_vars <- names(test)[sapply(test, is.integer)] 
+test[int_vars] <- lapply(test[int_vars], as.numeric)
+
+#Get Rid of ID's because they are useless, but store the test ones for the final csv that we need to read out
+
+train <- train[,-1]
+testIDs <- test[,1]
+test <- test[,-1]
+
+#Convert Characters to Factors for our pipeline
+charVars <- names(train)[sapply(train, is.character)]
+train[charVars] <- lapply(train[charVars], factor)
+
+charVars <- names(test)[sapply(test, is.character)]
+test[charVars] <- lapply(test[charVars], factor)
+
+
+numericFactors <- c("outdoor_job", "zip_code_last_digit") # Change numeric variables to factors
+train[numericFactors] <- lapply(train[numericFactors], factor)
+train$Cancer <- factor(train$Cancer, levels = c("Benign", "Malignant")) #Ensure that Benign is encoded first
+
+test[numericFactors] <- lapply(test[numericFactors], factor)
+
+str(train)
+str(test)
+
+```
+
+# 3) Training
+
+```{r}
+tsk_train <- as_task_classif(train, target = "Cancer")
+
+lrn_xgboost <- as_learner(imputation_pipeline %>>% 
+                            po("encode", method = "one-hot") %>>%
+                            lrn("classif.xgboost",
+                                predict_type = "prob",
+                                eta = eta,
+                                max_depth = max_depth,
+                                colsample_bytree = colsample_bytree,
+                                colsample_bylevel = colsample_bylevel,
+                                lambda = lambda,
+                                alpha = alpha,
+                                subsample = subsample
+                                )
+)
+
+set.seed(17)
+lrn_xgboost$train(tsk_train)
+```
+
+#4 Evaluation
+
+```{r}
+# Since there is no Cancer column in the test data set, I will add it so that my task can have it as a target
+test$Cancer <- factor(NA, levels = c("Benign", "Malignant"))
+tsk_test <- as_task_classif(test, target = "Cancer")
+
+preds <- lrn_xgboost$predict(tsk_test)$response
+
+preds <- data.frame(
+  ID = testIDs,
+  Cancer = preds
+)
+
+write.csv(preds, "group_13_submission3.csv", row.names = FALSE)
+
+```
+
+
+
+
+
+
+
+
+
