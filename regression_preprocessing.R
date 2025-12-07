@@ -147,18 +147,6 @@ data <- full_join(
 data <- data |>
   clean_names(sep_out=".")
 
-## add numeric variable for numeric factors
-# data <- data |>
-#   mutate(
-#     q.amazon.use.howmany = factor(q.amazon.use.howmany, ordered = TRUE),
-#     q.amazon.use.hh.size = factor(q.amazon.use.hh.size, ordered = TRUE)
-#   ) |>
-#   mutate(
-#     q.amazon.use.howmany.num = as.numeric(q.amazon.use.howmany),
-#     .after = q.amazon.use.howmany
-#   )
-
-
 ## dropping duplicate and redundant variables
 redundant <- c(
   "title",
@@ -308,39 +296,47 @@ data <- data %>%
     c("q.amazon.use.howmany", "q.life.changes", "q.demos.race", "top.categories")
   ))
 
-# ## Drop unnecessary columns
-# cols_to_drop <- c(
-#   "survey.responseid",
-#   "order.date",
-#   "shipping.address.state",
-#   "title",
-#   "asin.isbn.product.code",
-#   "q.demos.education",
-#   "q.demos.gender",
-#   "q.sexual.orientation",
-#   "q.demos.state",
-#   "q.amazon.use.hh.size",
-#   "q.amazon.use.how.oft",
-#   "q.substance.use.cigarettes",
-#   "q.substance.use.marijuana",
-#   "q.substance.use.alcohol",
-#   "q.personal.diabetes",
-#   "q.personal.wheelchair",
-#   "q.sell.your.data",
-#   "q.sell.consumer.data",
-#   "q.small.biz.use",
-#   "q.census.use",
-#   "q.research.society",
-#   "test"
-# )
-# cleaned_data <- data %>% select(setdiff(colnames(data), cols_to_drop))
-
 
 ## convert all character and logical variables to factors
 data <- data %>%
   mutate(
     across(where(is.character), as.factor),
     across(where(is.logical), as.factor)
+  )
+
+# data without the id variable 
+no_id_data <- data %>% select(setdiff(colnames(data), "survey.response.id"))
+
+# removing rows with missing values
+non_missing <- no_id_data[!is.na(no_id_data$q.amazon.use.hh.size.num), ]
+
+mod_mat <- model.matrix(~., data = non_missing)
+# head(mod_mat, n = 2)
+lasso_housing_tsk <- as_task_regr(mod_mat[, -1], target = "q.amazon.use.hh.size.num")
+
+lrn_lasso_cv <- lrn("regr.cv_glmnet", 
+  alpha = 1, 
+  nfolds = 10, 
+  s = "lambda.min", 
+  lambda = 10^seq(from = -1.5, to = 1.5, by = 0.1), 
+  standardize = TRUE
+)
+
+lrn_lasso_cv$train(lasso_housing_tsk)
+coef(lrn_lasso_cv$model)
+
+# drop the variables lasso shrunk  
+clean_data <- non_missing %>%
+  select(
+    -contains("q.demos.education"),
+    -contains("q.demos.gender"),
+    -contains("q.demos.hispanic"),
+    -contains("q.personal.wheelchair"),
+    -contains("q.sexual.orientation"),
+    -contains("q.substance.use"),
+    -contains("race"),
+    -contains("shipping.address"),
+    -contains("total.spent")
   )
 
 ## handle missing data
@@ -364,24 +360,3 @@ imputation_pipeline <- gunion(list(
 )) %>>%
   po("featureunion")
 
-# ## encode all other categorical variables
-# full_pipeline <- imputation_pipeline %>>%
-#   po("encode", method = "one-hot")
-# # data without the id variable 
-# no_id_data <- data %>% select(setdiff(colnames(data), "survey.response.id"))
-# # defining the task
-# housing_tsk <- as_task_regr(no_id_data, target = "q.amazon.use.hh.size.num")
-# # train pipeline on the data
-# full_pipeline$train(housing_tsk)
-# # impute the data
-# inputed_data <- full_pipeline$predict(housing_tsk)$task$data()
-
-# Create learner
-lrn_xgb <- as_learner(
-  imputation_pipeline %>>%
-    ## one-hot encode our variables
-    po("encode", method = "one-hot") %>>%
-
-    ## pass cleaned dataset into an XGBoost regression model
-    lrn("regr.xgboost")
-)
