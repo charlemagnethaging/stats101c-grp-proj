@@ -20,6 +20,14 @@ survey <- read_csv("data/regression/survey_train_test.csv")
 purchases <- purchases |> clean_names(sep_out=".")
 survey <- survey |> clean_names(sep_out=".")
 
+## remove the variables that aren't know at sign up
+columns_to_keep <- colSums(is.na(survey)) == 0
+columns_to_keep["q.amazon.use.hh.size.num"] <- TRUE
+survey <- survey[, columns_to_keep]
+
+# removing rows that are part of the test data
+survey <- survey[survey$test == FALSE, ]
+
 purchases$category[purchases$category == ""] <- NA
 
 ## Umbrella groups for the category variable
@@ -112,7 +120,7 @@ state_by_id <- purchases %>%
 
 # drop irrelevant categories 
 purchases <- purchases |>
-  select(!c(title, asin.isbn.product.code, category)) 
+  select(!c(title, asin.isbn.product.code, category))
 
 # flatten purchases to one row per ID
 
@@ -146,38 +154,6 @@ data <- full_join(
 ## rename variables to lower.case.dot.space
 data <- data |>
   clean_names(sep_out=".")
-
-## dropping duplicate and redundant variables
-redundant <- c(
-  "title",
-  "asin.isbn.product.code",
-  "q.demos.state",
-  "q.amazon.use.hh.size"
-)
-data <- data %>% select(setdiff(colnames(data), redundant))
-
-## dropping variables related to selling data questions 
-selling_variables <- c(
-  "q.sell.your.data",
-  "q.sell.consumer.data",
-  "q.small.biz.use",
-  "q.census.use",
-  "q.research.society",
-  "test"
-)
-data <- data %>% select(setdiff(colnames(data), selling_variables))
-
-## create an encoded variable based on if accounts are shared or not
-data <- data %>% 
-  mutate(shared.account = case_when(
-    # if the value is NA, keep it as NA for now 
-    is.na(q.amazon.use.howmany) ~ NA, 
-    # anything starting with 1 is encoded as 0
-    grepl("^1", q.amazon.use.howmany) ~ 0, 
-    # all other values are encoded as 1 
-    TRUE ~ 1 
-    )
-  )
 
 ## hot encoding for the multiple top categories variable 
 data <- data %>%
@@ -229,73 +205,9 @@ data <- data %>%
     category.other = ifelse(top.categories == "Other", 1, 0)
   )
 
-
-## hot encoding for the multiple choice life changes variable
+## drop the column we encoded
 data <- data %>%
-  mutate(
-    change.employment = ifelse(
-      str_detect(q.life.changes, 
-        regex("Lost a job", ignore_case = TRUE)),
-      1, 0),
-    change.relocation = ifelse(
-      str_detect(q.life.changes, 
-        regex("Moved place of residence", ignore_case = TRUE)),
-      1, 0),
-    change.relationship = ifelse(
-      str_detect(q.life.changes, 
-        regex("Divorce", ignore_case = TRUE)),
-      1, 0),
-    change.family = ifelse(
-      str_detect(q.life.changes, 
-        regex("Became pregnant|Had a child", ignore_case = TRUE)),
-      1, 0),
-    # no life changes selected
-    change.none = ifelse(q.life.changes == "", 1, 0)
-  )
-
-## hot endcoding race variables
-data <- data %>%
-  mutate(
-    race.white = ifelse(
-      str_detect(q.demos.race, 
-        regex("White|Caucasian", ignore_case = TRUE)),
-      1, 0),
-    race.black = ifelse(
-      str_detect(
-        q.demos.race,
-        regex("Black|African American", ignore_case = TRUE)
-      ),
-      1, 0),
-    race.asian = ifelse(
-      str_detect(q.demos.race, 
-        regex("Asian", ignore_case = TRUE)),
-      1, 0),
-    race.native.american = ifelse(
-      str_detect(
-        q.demos.race,
-        regex(
-          "American Indian|Native American|Alaska Native",
-          ignore_case = TRUE)),
-      1, 0),
-    race.pacific.islander = ifelse(
-      str_detect(
-        q.demos.race,
-        regex("Native Hawaiian|Pacific Islander", ignore_case = TRUE)),
-      1, 0),
-    race.other = ifelse(
-      str_detect(
-        q.demos.race, 
-        regex("Other", ignore_case = TRUE)),
-      1, 0)
-  )
-
-## drop the columns we encoded
-data <- data %>%
-  select(setdiff(
-    colnames(data),
-    c("q.amazon.use.howmany", "q.life.changes", "q.demos.race", "top.categories")
-  ))
-
+  select(setdiff(colnames(data),c("top.categories")))
 
 ## convert all character and logical variables to factors
 data <- data %>%
@@ -304,40 +216,11 @@ data <- data %>%
     across(where(is.logical), as.factor)
   )
 
-# data without the id variable 
-no_id_data <- data %>% select(setdiff(colnames(data), "survey.response.id"))
+# data without the id, test, and the duplicate state variable
+preprocessed_data <- data %>% select(setdiff(colnames(data), c("survey.response.id", "test", "q.demos.state")))
 
-# removing rows with missing values
-non_missing <- no_id_data[!is.na(no_id_data$q.amazon.use.hh.size.num), ]
-
-mod_mat <- model.matrix(~., data = non_missing)
-# head(mod_mat, n = 2)
-lasso_housing_tsk <- as_task_regr(mod_mat[, -1], target = "q.amazon.use.hh.size.num")
-
-lrn_lasso_cv <- lrn("regr.cv_glmnet", 
-  alpha = 1, 
-  nfolds = 10, 
-  s = "lambda.min", 
-  lambda = 10^seq(from = -1.5, to = 1.5, by = 0.1), 
-  standardize = TRUE
-)
-
-lrn_lasso_cv$train(lasso_housing_tsk)
-coef(lrn_lasso_cv$model)
-
-# drop the variables lasso shrunk  
-clean_data <- non_missing %>%
-  select(
-    -contains("q.demos.education"),
-    -contains("q.demos.gender"),
-    -contains("q.demos.hispanic"),
-    -contains("q.personal.wheelchair"),
-    -contains("q.sexual.orientation"),
-    -contains("q.substance.use"),
-    -contains("race"),
-    -contains("shipping.address"),
-    -contains("total.spent")
-  )
+# save the data into the directory
+save(preprocessed_data, file = "preprocessed_data.RData")
 
 ## handle missing data
 imputation_pipeline <- gunion(list(
