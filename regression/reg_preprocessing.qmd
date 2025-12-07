@@ -31,8 +31,8 @@ library(janitor)
 #| label: read data, format var names
 
 # Load datasets
-purchases <- read_csv("data/regression/amazon-purchases.csv")
-survey <- read_csv("data/regression/survey_train_test.csv")
+purchases <- read_csv("data/amazon-purchases.csv")
+survey <- read_csv("data/survey_train_test.csv")
 
 purchases <- purchases |> clean_names(sep_out = ".")
 survey <- survey |> clean_names(sep_out = ".")
