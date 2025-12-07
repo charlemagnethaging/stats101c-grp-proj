@@ -1,0 +1,544 @@
+---
+title: 'Regression Data Preprocessing'
+format:
+  html:
+    toc: true
+    code-fold: true
+    embed-resources: true
+    fig-align: center
+
+---
+
+```{r}
+#| label: setup
+#| include: false
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(rpart)
+library(mlr3verse)
+library(ggplot2)
+library(xgboost)
+library(dplyr)
+library(rpart)
+library(broom)
+library(glmnet)
+library(stringr)
+library(janitor)
+```
+
+
+```{r}
+#| label: read data, format var names
+
+# Load datasets
+purchases <- read_csv("data/regression/amazon-purchases.csv")
+survey <- read_csv("data/regression/survey_train_test.csv")
+
+purchases <- purchases |> clean_names(sep_out = ".")
+survey <- survey |> clean_names(sep_out = ".")
+```
+
+```{r}
+#| label: category umbrella
+
+## Umbrella grouping for categories (second attempt)
+
+# regex keywords -> umbrella
+
+# 1. Baby & Kids
+pat_baby <- "BABY|INFANT|DIAPER|NURSERY|STROLLER|CRIB|PACIFIER|WIPE|CAR_SEAT|HIGH_CHAIR|SAFETY_GATE|BREAST_PUMP|KIDS_ROOM|TEETHER|NOISE_MACHINE|TRAMPOLINE|COLLAPSIBLE_PLAY_STRUCTURE|CHANGING_PAD"
+
+# 2. Video Games
+pat_video_games <- "VIDEO_GAME|CONSOLE|CONTROLLER|NINTENDO|XBOX|PLAYSTATION|GAMING|GAME_BOY|DIGITAL_GAME|VIRTUAL_REALITY_HEADSET"
+
+# 3. Electronics (Added: TELEVISION, ANTENNA, RADIO, RECEIVER, CALCULATOR)
+pat_electronics <- "COMPUTER|LAPTOP|TABLET|PHONE|MOBILE|WIRELESS|HEADPHONE|SPEAKER|CAMERA|AUDIO|VIDEO|TV|TELEVISION|MONITOR|SCREEN|PROTECT|CABLE|CHARGER|ADAPTER|POWER|BATTERY|MOUSE|KEYBOARD|DRIVE|MEMORY|USB|PRINTER|DEVICE|CASE|COVER|FLASH|STRIP|DIGITAL|REMOTE|SWITCH|FILAMENT|COMPONENT|HUB|MULTIPORT|CAMCORDER|FILM|MOUNT|ELECTRONIC|ROUTER|NETWORK|SOFTWARE|ANTENNA|RADIO|RECEIVER|CALCULATOR|ALARM|MODEM"
+
+# 4. Grocery & Food (Added: PIZZA, HONEY, PICKLE)
+pat_grocery <- "FOOD|GROCERY|SNACK|CANDY|CHOCOLATE|BEVERAGE|COFFEE|TEA|JUICE|WATER|MEAT|DAIRY|SPICE|SAUCE|PANTRY|CEREAL|OIL|VINEGAR|COOK|DRINK|FRUIT|BREAD|POULTRY|HERB|NOODLE|SOUP|CRACKER|STEW|FLAVOR|NUT|SEED|LEGUME|JERKY|SYRUP|GUM|BUTTER|MILK|BAKE|BAKING|FLOUR|POPCORN|CONDIMENT|SUGAR|SEASON|CAKE|PASTRY|MEAL|EGG|PRETZEL|THICKEN|LEAVEN|CULINARY|VEGETABLE|PIZZA|HONEY|PICKLE|BEER|WINE|CASSEROLE"
+
+# 5. Apparel (Added: SCARF, SLEEPWEAR, NECKTIE, BADGE, SWEATBAND, APRON)
+pat_apparel <- "CLOTH|SHIRT|PANT|DRESS|COAT|JACKET|SWEATER|UNDERWEAR|SOCK|SHOE|BOOT|SNEAKER|BAG|HANDBAG|WALLET|WATCH|JEWELRY|ACCESSOR|SUNGLASSES|HAT|CAP|APPAREL|BRA|SWIM|SHORT|SANDAL|SLIPPER|PAJAMA|NECKLACE|RING|EARRING|GLOVE|SKIRT|LEOTARD|TUNIC|TIGHT|WIG|KEYCHAIN|OUTFIT|WAIST|GLASSES|STRAP|COSTUME|ROBE|CHARM|SCARF|SLEEPWEAR|NECKTIE|BADGE|SWEATBAND|APRON|EARMUFF|SUIT|CORSET|VEST|BLAZER|OVERALLS|FASHIONOTHER"
+
+# 6. Health & Medical
+pat_health <- "HEALTH|MEDIC|VITAMIN|SUPPLEMENT|FIRST_AID|BRACE|THERMOMETER|MASK|OPTICAL|LENS|DRUG|INCONTINENCE|SCALE|WEIGH|RESPIRATOR|SANITARY|BODY_POS|LAB_SUPPLY|EARPLUG|WALKER|WHEELCHAIR|CANE|THERAPEUTIC|COMPRESS|TAMPON|CONDOM|SANITIZER|WALKING_STICK|GLUCOSE_METER"
+
+# 7. Beauty & Personal Care (Added: TANNER, TWEEZER, DYE, TATTOO, SCRAPER)
+pat_beauty <- "MAKE_UP|BEAUTY|MAKEUP|SKIN|HAIR|COSMETIC|PERFUME|FRAGRAN|SHAMPOO|LOTION|NAIL|SHAV|RAZOR|GROOM|TOOTH|DENTAL|SALON|HYGIENE|DEODORANT|CONDITION|BALM|SUNSCREEN|MASSAG|LIP|MASCARA|EYELID|MOUTHWASH|LUBRICANT|LINT|EYELASH|EYEBROW|COTTON|SPONGE|TANNER|TWEEZER|DYE|TATTOO|SCRAPER|ORAL|CARE|AXE"
+
+# 8. Household Essentials
+pat_household <- "PAPER_TOWEL|TOILET_PAPER|CLEAN|DETERGENT|TRASH|LAUNDRY|SOAP|TISSUE|FOIL|WRAP|AIR_FRESH|DISINFECT|PEST|ADHESIVE|TAPE|BONDING|DEODORIZ|SOFTENER|VACUUM|MOP|BROOM|BUCKET|PURIFIER|HUMIDIFIER|DIFFUSER|INCENSE|TRAP|SQUEEGEE|BLEACH"
+
+# 9. Home Decor & Furniture (Added: BASKET, HEATER, SCULPTURE, HANGER, TIMER)
+pat_home <- "SHADE|FURNITURE|BED|MATTRESS|RUG|CURTAIN|DECOR|FRAME|SHEET|PILLOW|STORAGE|MIRROR|SOFA|CHAIR|DESK|TABLE|CABINET|SHELF|HOME|CLOSET|BLANKET|TOWEL|CADDY|FIGURINE|STICKER|ART|BANNER|ORNAMENT|FAN|ROD|THERMOS|WALL|MAT|CLOCK|VASE|SHOWER|SIGNAGE|ALBUM|BASKET|HEATER|SCULPTURE|HANGER|TIMER|SAFE|OTTOMAN"
+
+# 10. Kitchen & Dining (Added: FLATWARE, SPOON, PITCHER, NAPKIN)
+pat_kitchen <- "CHOPSTICK|KITCHEN|COOK|BAKE|DISH|KNIFE|PAN|POT|BLENDER|MIXER|TOASTER|MICROWAVE|REFRIGERATOR|CUTLERY|SPATULA|BOWL|CUP|MUG|DINING|GLASSWARE|BOTTLE|THERMOS|TRAY|CONTAINER|LID|ICE|COUNTERTOP|DRYING_RACK|AIR_FRYER|GRILL|OVEN|UTENSIL|FLASK|FLATWARE|SPOON|PITCHER|NAPKIN|JAR|FORK|TRIVET"
+
+# 11. Pets (Added: VIVARIUM)
+pat_pets <- "PET|DOG|CAT|ANIMAL|FISH|AQUARIUM|LITTER|HAMSTER|BIRD|REPTILE|VETERINARY|LEASH|FEEDER|VIVARIUM"
+
+# 12. Sports & Outdoors
+pat_sports <- "SPORT|EXERCISE|GYM|FITNESS|CAMPING|HIKING|TENT|FISHING|BIKE|BICYCLE|GOLF|BALL|HELMET|BACKPACK|SLEEPING_BAG|HAMMOCK|KNEE_PAD|MUSCLE|OUTERWEAR|STRENGTH|\\w+BELL|TREADMILL|SLEEVE|CARABINER|JUMP_ROPE|PULL_UP_BAR"
+
+# 13. Garden & Outdoor Living (Added: UMBRELLA)
+pat_garden <- "GARDEN|LAWN|PLANT|PATIO|POOL|FERTILIZER|WEED|MOSS|INSECT|REPELLENT|HOSE|SPRINKLER|SEED|SNOW|UMBRELLA|SPADE|TARP|LEAF_BLOWER"
+
+# 14. DIY, Auto & Tools (Added: FAUCET, DRAIN, SEALANT, ANCHOR)
+pat_diy_auto <- "LIGHT|TOOL|HARDWARE|DRILL|SAW|HAMMER|SCREW|WRENCH|PLUMBING|FIXTURE|PAINT|LADDER|LOCK|SANDPAPER|AUTO|VEHICLE|CAR_|TIRE|OIL|MOTOR|WIPER|BRAKE|LIGHTING|LAMP|BULB|FLASHLIGHT|HVAC|FILTER|BUILDING|VALVE|PIPE|PUMP|FIRE|LIGHTER|COMPRESSOR|GENERATOR|UTILITY|KIT|FAUCET|DRAIN|SEALANT|ANCHOR|PLUG|ELECTR|MECHANICAL|DOOR|CORD|WIRE|CAULK|INDUSTRIAL|TILE|MACHINE|SAND|GLUE|BOLT|PLIERS|GASKET|BLOWTORCH|CARBURETOR|FUSE|HOLE_PUNCH|WASHER|RELAY|INSULATION|WHEEL"
+
+# 15. Office & School (Added: NOTE, ERASER, STAMP)
+pat_office <- "OFFICE|PAPER|PEN|PENCIL|NOTEBOOK|BINDER|STAPLER|ENVELOPE|LABEL|DESK_ACCESSORY|FILE|FOLDER|SCISSOR|STATIONERY|WRITING|PLANNER|CALENDAR|BOARD|CARD|NOTE|ERASER|STAMP|RULER"
+
+# 16. Arts & Crafts (Added: THREAD)
+pat_arts <- "ART|CRAFT|SEWING|KNITTING|YARN|FABRIC|BEAD|CANVAS|PAINT_BRUSH|EASEL|SCRAPBOOK|THREAD"
+
+# 17. Toys & Hobbies
+pat_toys <- "TOY|PUZZLE|DOLL|FIGURE|LEGO|HOBBY|COLLECTIBLE|MODEL|DRONE|ROBOT|PLAYSET|FIDGE|PRETEND|STUFFED_ANIMAL|EQUIPMENT|PLECTRUM|BINOCULAR|GAME|GUITAR|SCOOTER|SKATE|BACKDROP|HOBBIE|TELESCOPE"
+
+# 18. Books & Media
+pat_media <- "BOOK|DVD|MOVIE|MUSIC|CD|VINYL|MAGAZINE|MEDIA"
+
+# 19. Party & Occasion
+pat_party <- "PARTY|GIFT|WRAP|DECORATION|BALLOON|FAVOR|CANDLE|RIBBON|BOW|CONFETTI"
+
+# Note: The order here implies priority in the case_when below i.e. if a keyphrase is in multiple patterns, it will be sorted into the first one below
+category_lookup <- purchases %>%
+	distinct(category) |> # speed up process by shrinking dataset to unique categories = nrows
+	mutate(
+		umbrella_category = case_when(
+			# 0. Missing Data
+			is.na(category) ~ "Unknown",
+			# 1. High Priority / Specific
+			str_detect(category, regex(pat_baby, ignore_case = TRUE)) ~ "Baby_Product",
+			str_detect(category, regex(pat_video_games, ignore_case = TRUE)) ~ "Video_Games",
+			str_detect(category, regex(pat_electronics, ignore_case = TRUE)) ~ "Electronics_and_Computers",
+			# 2. Food & Consumables
+			str_detect(category, regex(pat_grocery, ignore_case = TRUE)) ~ "Grocery_and_Food",
+			# 3. Personal Items
+			str_detect(category, regex(pat_apparel, ignore_case = TRUE)) ~ "Apparel_and_Accessories",
+			str_detect(category, regex(pat_health, ignore_case = TRUE)) ~ "Health_and_Medical",
+			str_detect(category, regex(pat_beauty, ignore_case = TRUE)) ~ "Beauty_and_Personal_Care",
+			# 4. Home & Living (Order matters: Essentials -> Kitchen -> Decor -> General)
+			str_detect(category, regex(pat_household, ignore_case = TRUE)) ~ "Household_Essentials",
+			str_detect(category, regex(pat_kitchen, ignore_case = TRUE)) ~ "Kitchen_and_Dining",
+			str_detect(category, regex(pat_home, ignore_case = TRUE)) ~ "Home_Decor_and_Furniture",
+			# 5. Specialized
+			str_detect(category, regex(pat_pets, ignore_case = TRUE)) ~ "Pet_Supplies",
+			str_detect(category, regex(pat_sports, ignore_case = TRUE)) ~ "Sports_and_Outdoors",
+			str_detect(category, regex(pat_garden, ignore_case = TRUE)) ~ "Garden_and_Outdoor",
+			str_detect(category, regex(pat_diy_auto, ignore_case = TRUE)) ~ "DIY_Auto_and_Lighting",
+			str_detect(category, regex(pat_arts, ignore_case = TRUE)) ~ "Arts_and_Crafts",
+      str_detect(category, regex(pat_toys, ignore_case = TRUE)) ~ "Toys_and_Hobbies",
+			# 6. General / Low Priority
+			str_detect(category, regex(pat_office, ignore_case = TRUE)) ~ "Office_and_School",
+			str_detect(category, regex(pat_media, ignore_case = TRUE)) ~ "Books_and_Media",
+			str_detect(category, regex(pat_party, ignore_case = TRUE)) ~ "Party_and_Occasion",
+
+			TRUE ~ "Other"))
+
+purchases <- purchases |>
+	left_join(category_lookup, by = "category")
+
+
+purchases |>
+	select(umbrella_category) |>
+	count(umbrella_category, sort = TRUE) |> 
+  print(n=30)
+
+purchases |>
+	filter(umbrella_category == "Other") |>
+	count(category, sort = TRUE) |> filter(n>=100) |> print(n=1000)
+	write_csv("unclassified_categories.csv")
+```
+
+This is Charlie's revised category summation. I did use Gemini to help find sort categories into umbrellas, and supervised its sorting and then did manual sorting (by investigating leftover Other column multiple times and updating the umbrella regex patterns with new keywords) to reduce the "Other" category further.
+
+```{r}
+#| label: category umbrella (old)
+## Umbrella groups for the category variable
+purchases <- purchases %>%
+  mutate(
+    category = case_when(
+      str_detect(
+        category,
+        regex("BOOK|MUSIC|DVD", ignore_case = TRUE)
+      ) ~ "Media",
+      str_detect(
+        category,
+        regex("TOY|GAME|FIGURE|PUZZLE", ignore_case = TRUE)
+      ) ~ "Games",
+      str_detect(
+        category,
+        regex(
+          "SHIRT|PANTS|DRESS|SHORTS|SWIMWEAR|SWEATER|SWEATSHIRT|BRA|UNDERPANTS|PAJAMAS|TUNIC|LEOTARD|ONE_PIECE_OUTFIT|APPAREL",
+          ignore_case = TRUE
+        )
+      ) ~ "Clothing",
+      str_detect(category, regex("PET|ANIMAL", ignore_case = TRUE)) ~ "Pet",
+      str_detect(
+        category,
+        regex(
+          "FOOD|SNACK|COFFEE|TEA|JUICE|MILK|BREAD|CHOCOLATE|SAUCE|SUGAR|NOODLE|RICE|PASTRY",
+          ignore_case = TRUE
+        )
+      ) ~ "Food",
+      str_detect(
+        category,
+        regex(
+          "BEAUTY|SKIN|HAIR|COSMETIC|FRAGRANCE|LIP|MASCARA|NAIL",
+          ignore_case = TRUE
+        )
+      ) ~ "Beauty",
+      str_detect(
+        category,
+        regex(
+          "ELECTRONIC|PHONE|HEADPHONES|CAMERA|MONITOR|FLASH|COMPUTER|TABLET|ACCESSORY|INPUT|DEVICE|DRIVE",
+          ignore_case = TRUE
+        )
+      ) ~ "Electronics",
+      str_detect(
+        category,
+        regex(
+          "HOME|FURNITURE|LAMP|LIVING|DECOR|BED|BATH|KITCHEN|STORAGE|CLEANING|APPLIANCE|TOOL|LIGHT",
+          ignore_case = TRUE
+        )
+      ) ~ "Home",
+      str_detect(
+        category,
+        regex("SPORT|EXERCISE|FITNESS|RECREATION", ignore_case = TRUE)
+      ) ~ "Fitness",
+      str_detect(
+        category,
+        regex(
+          "HEALTH|MEDICATION|SUPPLEMENT|VITAMIN|THERMOMETER|ORTHOPEDIC|PROTECTOR",
+          ignore_case = TRUE
+        )
+      ) ~ "Health",
+      str_detect(
+        category,
+        regex(
+          "STATIONERY|PAPER|MARKING|INK|PEN|WRITING|NOTEBOOK",
+          ignore_case = TRUE
+        )
+      ) ~ "Stationery",
+      TRUE ~ "Other"
+    )
+  )
+```
+
+```{r}
+# the top 5 categories for each ID
+top_categories_by_id <- purchases %>%
+  group_by(survey.response.id, category) %>%
+  summarise(n = n(), .groups = 'drop_last') %>%
+  arrange(desc(n)) %>%
+  slice_head(n = 5) %>%
+  summarise(top.categories = paste(category, collapse = ", ")) %>%
+  ungroup()
+
+# the shipping address state for each ID
+state_by_id <- purchases %>%
+  group_by(survey.response.id, shipping.address.state) %>%
+  summarise(n = n(), .groups = 'drop_last') %>%
+  arrange(desc(n)) %>%
+  slice_head(n = 1) %>%
+  select(survey.response.id, shipping.address.state) %>%
+  ungroup()
+
+# drop irrelevant categories
+purchases <- purchases |>
+  select(!c(title, asin.isbn.product.code, category))
+
+# flatten purchases to one row per ID
+
+# summarize the total spent by the user
+# and the average amount spent per order for the user
+purchases <- purchases |>
+  group_by(survey.response.id, order.date) |>
+  summarize(
+    order.price = sum(purchase.price.per.unit * quantity)
+  ) |>
+  group_by(survey.response.id) |>
+  summarize(
+    total.spent = sum(order.price),
+    avg.order.price = mean(order.price),
+  ) |>
+  ungroup()
+
+# merge the top categories summary & shipping address state into purchases
+purchases <- purchases |>
+  left_join(top_categories_by_id, by = "survey.response.id") |>
+  left_join(state_by_id, by = "survey.response.id")
+
+# Full join datasets on Survey Response ID
+data <- full_join(
+  purchases,
+  survey,
+  by = join_by(survey.response.id == survey.response.id)
+)
+
+## rename variables to lower.case.dot.space
+data <- data |>
+  clean_names(sep_out = ".")
+
+## dropping duplicate and redundant variables
+redundant <- c(
+  "title",
+  "asin.isbn.product.code",
+  "q.demos.state",
+  "q.amazon.use.hh.size"
+)
+data <- data %>% select(setdiff(colnames(data), redundant))
+
+## dropping variables related to selling data questions
+selling_variables <- c(
+  "q.sell.your.data",
+  "q.sell.consumer.data",
+  "q.small.biz.use",
+  "q.census.use",
+  "q.research.society",
+  "test"
+)
+data <- data %>% select(setdiff(colnames(data), selling_variables))
+
+## create an encoded variable based on if accounts are shared or not
+data <- data %>%
+  mutate(
+    shared.account = case_when(
+      # if the value is NA, keep it as NA for now
+      is.na(q.amazon.use.howmany) ~ NA,
+      # anything starting with 1 is encoded as 0
+      grepl("^1", q.amazon.use.howmany) ~ 0,
+      # all other values are encoded as 1
+      TRUE ~ 1
+    )
+  )
+
+## hot encoding for the multiple top categories variable
+data <- data %>%
+  mutate(
+    category.media = ifelse(
+      str_detect(top.categories, regex("Media", ignore_case = TRUE)),
+      1,
+      0
+    ),
+    category.games = ifelse(
+      str_detect(top.categories, regex("Games", ignore_case = TRUE)),
+      1,
+      0
+    ),
+    category.clothing = ifelse(
+      str_detect(top.categories, regex("Clothing", ignore_case = TRUE)),
+      1,
+      0
+    ),
+    category.pet = ifelse(
+      str_detect(top.categories, regex("Pet", ignore_case = TRUE)),
+      1,
+      0
+    ),
+    category.food = ifelse(
+      str_detect(top.categories, regex("Food", ignore_case = TRUE)),
+      1,
+      0
+    ),
+    category.beauty = ifelse(
+      str_detect(top.categories, regex("Beauty", ignore_case = TRUE)),
+      1,
+      0
+    ),
+    category.electronics = ifelse(
+      str_detect(top.categories, regex("Electronics", ignore_case = TRUE)),
+      1,
+      0
+    ),
+    category.home = ifelse(
+      str_detect(top.categories, regex("Home", ignore_case = TRUE)),
+      1,
+      0
+    ),
+    category.fitness = ifelse(
+      str_detect(top.categories, regex("Fitness", ignore_case = TRUE)),
+      1,
+      0
+    ),
+    category.health = ifelse(
+      str_detect(top.categories, regex("Health", ignore_case = TRUE)),
+      1,
+      0
+    ),
+    category.stationery = ifelse(
+      str_detect(top.categories, regex("Stationery", ignore_case = TRUE)),
+      1,
+      0
+    ),
+    category.other = ifelse(top.categories == "Other", 1, 0)
+  )
+
+
+## hot encoding for the multiple choice life changes variable
+data <- data %>%
+  mutate(
+    change.employment = ifelse(
+      str_detect(q.life.changes, regex("Lost a job", ignore_case = TRUE)),
+      1,
+      0
+    ),
+    change.relocation = ifelse(
+      str_detect(
+        q.life.changes,
+        regex("Moved place of residence", ignore_case = TRUE)
+      ),
+      1,
+      0
+    ),
+    change.relationship = ifelse(
+      str_detect(q.life.changes, regex("Divorce", ignore_case = TRUE)),
+      1,
+      0
+    ),
+    change.family = ifelse(
+      str_detect(
+        q.life.changes,
+        regex("Became pregnant|Had a child", ignore_case = TRUE)
+      ),
+      1,
+      0
+    ),
+    # no life changes selected
+    change.none = ifelse(q.life.changes == "", 1, 0)
+  )
+
+## hot endcoding race variables
+data <- data %>%
+  mutate(
+    race.white = ifelse(
+      str_detect(q.demos.race, regex("White|Caucasian", ignore_case = TRUE)),
+      1,
+      0
+    ),
+    race.black = ifelse(
+      str_detect(
+        q.demos.race,
+        regex("Black|African American", ignore_case = TRUE)
+      ),
+      1,
+      0
+    ),
+    race.asian = ifelse(
+      str_detect(q.demos.race, regex("Asian", ignore_case = TRUE)),
+      1,
+      0
+    ),
+    race.native.american = ifelse(
+      str_detect(
+        q.demos.race,
+        regex(
+          "American Indian|Native American|Alaska Native",
+          ignore_case = TRUE
+        )
+      ),
+      1,
+      0
+    ),
+    race.pacific.islander = ifelse(
+      str_detect(
+        q.demos.race,
+        regex("Native Hawaiian|Pacific Islander", ignore_case = TRUE)
+      ),
+      1,
+      0
+    ),
+    race.other = ifelse(
+      str_detect(
+        q.demos.race,
+        regex("Other", ignore_case = TRUE)
+      ),
+      1,
+      0
+    )
+  )
+
+## drop the columns we encoded
+data <- data %>%
+  select(setdiff(
+    colnames(data),
+    c(
+      "q.amazon.use.howmany",
+      "q.life.changes",
+      "q.demos.race",
+      "top.categories"
+    )
+  ))
+
+
+## convert all character and logical variables to factors
+data <- data %>%
+  mutate(
+    across(where(is.character), as.factor),
+    across(where(is.logical), as.factor)
+  )
+
+# data without the id variable
+no_id_data <- data %>% select(setdiff(colnames(data), "survey.response.id"))
+
+# removing rows with missing values
+non_missing <- no_id_data[!is.na(no_id_data$q.amazon.use.hh.size.num), ]
+
+mod_mat <- model.matrix(~., data = non_missing)
+# head(mod_mat, n = 2)
+lasso_housing_tsk <- as_task_regr(
+  mod_mat[, -1],
+  target = "q.amazon.use.hh.size.num"
+)
+
+lrn_lasso_cv <- lrn(
+  "regr.cv_glmnet",
+  alpha = 1,
+  nfolds = 10,
+  s = "lambda.min",
+  lambda = 10^seq(from = -1.5, to = 1.5, by = 0.1),
+  standardize = TRUE
+)
+
+lrn_lasso_cv$train(lasso_housing_tsk)
+coef(lrn_lasso_cv$model)
+
+# drop the variables lasso shrunk
+clean_data <- non_missing %>%
+  select(
+    -contains("q.demos.education"),
+    -contains("q.demos.gender"),
+    -contains("q.demos.hispanic"),
+    -contains("q.personal.wheelchair"),
+    -contains("q.sexual.orientation"),
+    -contains("q.substance.use"),
+    -contains("race"),
+    -contains("shipping.address"),
+    -contains("total.spent")
+  )
+
+save(clean_data, file = "data/regression/clean_data.RData")
+
+## handle missing data
+imputation_pipeline <- gunion(list(
+  # numeric features: regression tree imputation
+  po("select", id = "sel_num", selector = selector_type("numeric")) %>>%
+    po("imputelearner", id = "imp_num", learner = lrn("regr.rpart")),
+  # factor / ordered features: classification tree imputation
+  po(
+    "select",
+    id = "sel_cat",
+    selector = selector_type(c("factor", "ordered"))
+  ) %>>%
+    po("imputelearner", id = "imp_cat", learner = lrn("classif.rpart")),
+  # everything else (IDs, dates, etc.) just passed through
+  po(
+    "select",
+    id = "sel_rest",
+    selector = selector_invert(selector_type(c("numeric", "factor", "ordered")))
+  )
+)) %>>%
+  po("featureunion")
+```
