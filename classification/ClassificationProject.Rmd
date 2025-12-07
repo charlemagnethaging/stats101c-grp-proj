@@ -1,0 +1,647 @@
+---
+title: "Classification Project"
+author: "Eddie He"
+date: "2025-12-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+Introduction
+```{r}
+train <- read.csv("SkinCancerTrain.csv")
+int_vars <- names(train)[sapply(train, is.integer)]
+train[int_vars] <- lapply(train[int_vars], as.numeric)
+trainIDs <- train$ID
+train <- train[,-1]
+str(train)
+colSums(is.na(train))
+```
+
+EDA Step 1: Converting Character and Some Integer Variables into Factors
+```{r}
+charVars <- names(train[sapply(train, is.character)])
+train[charVars] <- lapply(train[charVars], factor)
+
+numericFactors <- c("outdoor_job", "zip_code_last_digit")
+train[numericFactors] <- lapply(train[numericFactors], factor)
+
+#While possibly a redundant line, this ensures that the levels are ordered properly
+#This means for an XG boost, benign will be assigned as the negative class and malignant will be assigned as the postiive class
+train$Cancer <- factor(train$Cancer, levels = c("Benign", "Malignant"))
+
+str(train)
+```
+
+EDA Step 1: Explore Variables that might be related to outcome
+``` {r}
+
+
+
+## ================= VS CANCER ===========================
+
+## 1. Age vs Cancer / removable
+boxplot(age ~ Cancer, data = train,
+        main = "Age vs Cancer",
+        xlab = "Cancer status", ylab = "Age")
+
+## 2. Skin tone vs Cancer
+tab_skin  <- table(train$skin_tone, train$Cancer)
+prop_skin <- prop.table(tab_skin, 1)[,"Malignant"]
+barplot(prop_skin,
+        main = "Proportion Malignant by Skin Tone",
+        ylab = "Proportion malignant", xlab = "Skin tone",
+        ylim = c(0, max(prop_skin)*1.1), las = 2)
+
+## 3. Avg daily UV vs Cancer / removable
+boxplot(avg_daily_uv ~ Cancer, data = train,
+        main = "Avg Daily UV vs Cancer",
+        xlab = "Cancer", ylab = "Avg daily UV")
+
+## 4. Tanning bed use vs Cancer
+par(mar = c(7,4,4,2))   # more bottom space
+
+tab_tb  <- table(train$tanning_bed_use, train$Cancer)
+prop_tb <- prop.table(tab_tb, 1)[,"Malignant"]
+
+bp <- barplot(prop_tb,
+              main = "Proportion Malignant by Tanning Bed Use",
+              ylab = "Proportion malignant",
+              xlab = "",
+              ylim = c(0, max(prop_tb)*1.1),
+              xaxt = "n")   # turn off x-axis labels
+
+# Add rotated labels (45 degrees)
+text(x = bp,
+     y = par("usr")[3] - 0.01,
+     labels = names(prop_tb),
+     srt = 45,
+     adj = 1,
+     xpd = TRUE)
+
+title(xlab = "Tanning bed use", line = 4)
+
+
+## 5. Immunosuppressed vs Cancer
+tab_im  <- table(train$immunosuppressed, train$Cancer)
+prop_im <- prop.table(tab_im, 1)[,"Malignant"]
+barplot(prop_im,
+        main = "Proportion Malignant by Immunosuppression",
+        ylab = "Proportion malignant", xlab = "Immunosuppressed",
+        ylim = c(0, max(prop_im)*1.1), las = 2)
+
+## 6. Smoking status vs Cancer
+par(mar = c(7,4,4,2))  # more bottom space so label fits
+
+tab_sm  <- table(train$smoking_status, train$Cancer)
+prop_sm <- prop.table(tab_sm, 1)[,"Malignant"]
+
+barplot(prop_sm,
+        main = "Proportion Malignant by Smoking Status",
+        ylab = "Proportion malignant",
+        xlab = "",
+        ylim = c(0, max(prop_sm)*1.1),
+        las = 2)
+
+title(xlab = "Smoking status", line = 4)   # LOWER x-label
+
+
+## 7. Skin lesions vs Cancer / removable
+boxplot(number_of_lesions ~ Cancer, data = train,
+        main = "Lesions vs Cancer",
+        xlab = "Cancer", ylab = "Number of lesions")
+
+## 8. Sunburns past year vs Cancer
+tab_sb  <- table(train$sunburns_last_year, train$Cancer)
+prop_sb <- prop.table(tab_sb, 1)[,"Malignant"]
+barplot(prop_sb,
+        main = "Proportion Malignant by Sunburns Last Year",
+        ylab = "Proportion malignant", xlab = "Sunburns last yr",
+        ylim = c(0, max(prop_sb)*1.1), las = 2)
+
+## 9. Family history vs Cancer
+tab_fh  <- table(train$family_history, train$Cancer)
+prop_fh <- prop.table(tab_fh, 1)[,"Malignant"]
+barplot(prop_fh,
+        main = "Proportion Malignant by Family History",
+        ylab = "Proportion malignant", xlab = "Family history",
+        ylim = c(0, max(prop_fh)*1.1), las = 2)
+
+## ================= INTERACTIONS ===========================
+
+
+
+
+```
+
+
+``` {r}
+prop_by_bin <- function(x, cancer, breaks) {
+  binned <- cut(x, breaks = breaks, include.lowest = TRUE, right = FALSE)
+  tab <- table(binned, cancer)
+  prop_malignant <- prop.table(tab, 1)[, "Malignant"]
+  list(bins = levels(binned), props = prop_malignant)
+}
+
+age_res <- prop_by_bin(train$age, train$Cancer,
+                       breaks = seq(0, 90, by = 10))
+
+par(mar = c(8,4,4,2))  # more bottom space
+
+plot(age_res$props, type="b", pch=16,
+     xaxt="n",
+     main="Proportion Malignant by Age",
+     xlab="", ylab="Proportion Malignant")
+
+axis(1, at = 1:length(age_res$bins), labels = age_res$bins, las=2)
+title(xlab = "Age Bin", line = 5)   # LOWER x-axis label
+
+plot(age_res$props, type="b", pch=16,
+     xaxt="n",
+     main="Proportion Malignant by Age",
+     xlab="Age Bin", ylab="Proportion Malignant")
+
+axis(1, at = 1:length(age_res$bins), labels = age_res$bins, las=2)
+uv_res <- prop_by_bin(train$avg_daily_uv, train$Cancer,
+                      breaks = seq(0, max(train$avg_daily_uv, na.rm=TRUE)+1, by=1))
+
+plot(uv_res$props, type="b", pch=16,
+     xaxt="n",
+     main="Proportion Malignant by UV Exposure",
+     xlab="Avg Daily UV Bin", ylab="Proportion Malignant")
+
+axis(1, at = 1:length(uv_res$bins), labels = uv_res$bins, las=2)
+
+lesion_res <- prop_by_bin(train$number_of_lesions, train$Cancer,
+                          breaks = c(0, 2, 4, 6, 10)  
+)
+
+# Recreate the same binning used in prop_by_bin
+uv_breaks <- seq(0, max(train$avg_daily_uv, na.rm = TRUE) + 1, by = 1)
+
+uv_binned <- cut(train$avg_daily_uv,
+                 breaks = uv_breaks,
+                 include.lowest = TRUE, right = FALSE)
+
+uv_counts <- table(uv_binned)
+
+barplot(uv_counts,
+        main = "Count of Observations by UV Bin",
+        xlab = "Avg Daily UV Bin",
+        ylab = "Count",
+        las  = 2)
+
+
+plot(lesion_res$props, type="b", pch=16,
+     xaxt="n",
+     main="Proportion Malignant by Lesion Count",
+     xlab="Lesion Bin", ylab="Proportion Malignant")
+
+axis(1, at = 1:length(lesion_res$bins), labels = lesion_res$bins, las=2)
+
+```
+
+
+```{r}
+uv_bin <- cut(train$avg_daily_uv, breaks = seq(0, 10, 2))
+
+tab <- with(train, table(uv_bin, outdoor_job, Cancer))
+prop <- prop.table(tab, margin = c(1,2))[,, "Malignant"]
+
+matplot(prop, type="l", lty=1, col=1:2,
+        main="Interaction: UV × Outdoor Job",
+        xlab="UV Bin", ylab="Prop Malignant")
+legend("topleft", legend=levels(train$outdoor_job), col=1:2, lty=1)
+
+
+```
+
+
+```{r}
+
+tab <- with(train, table(uv_bin, skin_tone, Cancer))
+prop <- prop.table(tab, c(1,2))[,, "Malignant"]
+
+matplot(prop, type="l", lty=1, col=1:6,
+        main="Interaction: UV × Skin Tone",
+        xlab="UV Bin", ylab="Prop Malignant")
+legend("topleft", legend=levels(train$skin_tone), col=1:6, lty=1, cex=0.7)
+
+```
+
+
+
+
+Preprocessing: Imputing Missing Values
+```{r, warning = F}
+library(mlr3)
+library(mlr3pipelines)
+library(mlr3learners)
+library(mlr3tuning)
+library(paradox)
+library(future)
+
+workers <- max(2, parallel::detectCores() - 2)
+plan(multisession, workers = workers)
+workers
+
+imputation_pipeline <- gunion(list(
+    po("select", id = "sel_num", selector = selector_type("numeric")) %>>%
+      po("imputelearner", id = "imp_num", learner = lrn("regr.rpart")),
+    po("select", id = "sel_cat", selector = selector_type(c("factor","ordered"))) %>>%
+      po("imputelearner", id = "imp_cat", learner = lrn("classif.rpart")),
+    po("select", id = "sel_rest", selector = selector_invert(selector_type(c("numeric","factor","ordered"))))
+  )) %>>%
+    po("featureunion")
+
+```
+
+Discussion of Potential Models
+
+Linear Probability Model
+Tree
+Random Forest
+XGBoost
+
+Step 1: Define Tasks
+```{r}
+train_lpm <- train
+train_lpm$Cancer = ifelse(train_lpm$Cancer == "Malignant", 1, 0)
+
+
+task_cancer <- as_task_classif(train, target = "Cancer")
+task_cancer_lpm <- as_task_regr(train_lpm, target = "Cancer")
+```
+
+Step 1.1: Split data into into train and test to evaluate later
+
+```{r}
+set.seed(17)
+split <- partition(task_cancer, ratio = 0.67)
+train_idx <- split$train
+test_idx <- split$test
+```
+
+
+#Step 2: Define Learners and Hyperparmeters
+```{r}
+lrn_lpm <- as_learner(imputation_pipeline %>>% 
+                        po("encode", method = "one-hot") %>>%
+                        (lrn("regr.cv_glmnet", 
+                             alpha = 1, 
+                             nfolds = 10, 
+                             s = "lambda.min", 
+                             lambda = 10^seq(from = -1.5, to = 1.5, by = 0.1), 
+                             standardize = TRUE)
+                         )
+                      )
+
+lrn_rpart <- as_learner(imputation_pipeline %>>% 
+                          lrn("classif.rpart",
+                              maxdepth = to_tune(),
+                              minsplit = to_tune(2,100)
+                              )
+                        )
+
+lrn_ranger <- as_learner(imputation_pipeline %>>% 
+                           lrn("classif.ranger",
+                               num.trees = 500, #We could optimize over this, but a large number is 
+                               #good, and there are diminishing returns. It would pretty much just 
+                               #choose the maximum number of trees from our range, 
+                               #so we might as well just fix it.
+                               mtry = to_tune(5, 30),
+                               importance = "impurity",
+                               max.depth = to_tune(5,25)
+                               )
+                         )
+
+#https://www.ibm.com/think/topics/random-forest
+#The article tells us to set hyper parameters for the number of trees, the size of our sample of parameters to split at on each node, and the node size. Unfortunately, I have been unable to figure out how to how to sample the node size, and when looking at the next chunk, we find that its class is ParamUty instead of ParamInt, making it impossible to tune with numerical bounds setting it as to_tune(n1, n2). As such, I have alotted to tune max_depth. This DOES NOT restrict the minimum number of observations per node, but by limiting the depth may increase the average number of observations in each node. This is not perfect, but I am unsure of what other parameter I can tune.
+
+lrn_xgboost <- as_learner(imputation_pipeline %>>% 
+                            po("encode", method = "one-hot") %>>%
+                            lrn("classif.xgboost",
+                                predict_type = "prob",
+                                eta = to_tune(1e-4, 1, logscale = TRUE),
+                                max_depth = to_tune(1, 10),
+                                colsample_bytree = to_tune(1e-1, 1),
+                                colsample_bylevel = to_tune(1e-1, 1),
+                                lambda = to_tune(1e-3, 1e3, logscale = TRUE),
+                                alpha = to_tune(1e-3, 1e3, logscale = TRUE),
+                                subsample = to_tune(1e-1, 1)
+                                )
+                          )
+#Parameters being tuned taken directly from slides
+```
+
+Used to find the parameters to optimize over
+```{r, echo = F}
+library("tidyverse")
+lrn_lpm$param_set |> as.data.table() |> 
+  select(id, class, lower, upper, nlevels)
+lrn_rpart$param_set |> as.data.table() |> 
+  select(id, class, lower, upper, nlevels)
+lrn_ranger$param_set |> as.data.table() |> 
+  select(id, class, lower, upper, nlevels)
+lrn_xgboost$param_set |> as.data.table() |> 
+  select(id, class, lower, upper, nlevels)
+```
+
+Step 3: Tune Learners to find Hyperparameters
+
+
+3.1.1 LPM
+```{r}
+set.seed(17)
+# Our learner is a cv.glmnet that already performs a 10 fold Cross Validation
+lpm <- lrn_lpm$train(task_cancer_lpm, row_ids = train_idx)
+lambda <- lpm$model$regr.cv_glmnet$model$lambda.min
+lambda
+```
+
+3.1.2 LPM Accuracy
+``` {r}
+pred <- lpm$predict(task_cancer_lpm, row_ids = test_idx)
+
+y_pred <- pred$response
+y_real <- pred$truth
+
+y_pred <- ifelse(y_pred > 0.5, 1, 0)
+lpm_acc <- mean(y_pred == y_real)
+lpm_acc
+```
+3.2 Tuning MLR3 Classification Learners
+
+The tuning is performed by a 5 fold cross validation. We want to see how well this data performs on unseen data. The rubric asserts that we should perform a K-fold cross validation to measure the performance of candidate models (evaluation). This however, becomes, extremely time intensive. Say we split the data into 5 folds. We choose 4 folds from the entire data set. Inside there is another 5 fold cross validation performed on the tuner the determine the optimal hyper parameters. We conduct this 5 times and get the average accuracy of each method. This runs in o(n^2) time complexity. Importantly, the tuner takes quite a long time to run on the xgboost model, so this script can take hours to compile. If instead of performing a 5 fold cross validation for accuracy, we simply break the data into training and test sets (as we have done in both discussion and in lecture for large models), we only perform 1 5 fold cross validation per model instead of 5. This runs much quicker.
+
+We are still using cross validation -- in tuning, not evaluation. Because we are splitting into one testing and one training set, it is entirely possible that our models could be too optimistic or too pessimistic. We might even have a model that should perform worse than others on unseen data performing better than others because of random chance. However, since there are so many parameters to tune, I hope that sacrificing some statistical rigor found in a full nested CV for time is acceptable. 
+
+3.2.1 Tree Tuning
+```{r}
+set.seed(17)
+at_tree <- auto_tuner(
+  learner = lrn_rpart,
+  resampling = rsmp("cv", folds = 5),
+  measure = msr("classif.acc"),
+  tuner = tnr("grid_search", resolution = 10)
+)
+at_tree$train(task_cancer, row_ids = train_idx)
+
+tree_params <- at_tree$tuning_result
+```
+
+3.2.2 Tree Evaluation
+```{r}
+at_tree_preds <- at_tree$predict(task_cancer, row_ids = test_idx)
+at_tree_acc <- at_tree_preds$score(msr("classif.acc"))
+
+tree_params
+at_tree_acc
+
+```
+
+3.3.1 RF Tuning
+```{r}
+set.seed(17)
+at_ranger <- auto_tuner(
+  learner = lrn_ranger,
+  resampling = rsmp("cv", folds = 3),
+  measure = msr("classif.acc"),
+  tuner = tnr("random_search"),
+  term_evals = 20
+)
+
+at_ranger$train(task_cancer, row_ids = train_idx)
+
+rf_params <- at_ranger$tuning_result
+```
+
+
+
+
+3.3.2 Rf Evaluation
+
+```{r}
+at_ranger_preds <- at_ranger$predict(task_cancer,row_ids = test_idx)
+at_ranger_acc <- at_ranger_preds$score(msr("classif.acc"))
+
+rf_params
+at_ranger_acc
+```
+
+3.4.1 XGBoost Tuning
+
+```{r}
+set.seed(17)
+at_xgb <- auto_tuner(
+  learner = lrn_xgboost,
+  resampling = rsmp("cv", folds =5),
+  measure = msr("classif.acc"),
+  tuner = tnr("random_search"),
+  term_evals = 100
+)
+
+at_xgb$train(task_cancer, row_ids = train_idx)
+
+xgb_params <- at_xgb$tuning_result
+```
+
+3.4.2 XGBoost Evaluation
+```{r}
+at_xgb_pred <- at_xgb$predict(task_cancer, row_ids = test_idx)
+at_xgb_acc <- at_xgb_pred$score(msr('classif.acc'))
+at_xgb_acc
+
+
+saveRDS(xgb_params, "xgb_best_params1.rds")
+xgb_params
+
+```
+
+3.5 Variable Importance Plots for All 4 Models
+
+LPM
+```{r}
+# LPM: coefficient plot (uses existing 'lpm' fit, no re-tuning)
+
+# In a GraphLearner, the last node is the glmnet learner
+glmnet_node  <- tail(lpm$model, 1)[[1]]
+glmnet_model <- glmnet_node$model   # this should be a cv.glmnet object
+
+# Choose lambda: cv.glmnet stores lambda.min
+lambda_star <- glmnet_model$lambda.min
+# (fallback if for some reason lambda.min is missing)
+if (is.null(lambda_star)) {
+  lambda_star <- glmnet_model$lambda[which.min(glmnet_model$cvm)]
+}
+
+# Coefficients at chosen lambda
+coef_mat <- as.matrix(coef(glmnet_model, s = lambda_star))
+
+coef_df <- data.frame(
+  feature = rownames(coef_mat),
+  coef    = as.numeric(coef_mat)
+)
+
+# Drop intercept and zero coefficients
+coef_df <- subset(coef_df, feature != "(Intercept)" & coef != 0)
+
+# If everything got shrunk to zero (unlikely but possible), avoid errors
+if (nrow(coef_df) == 0) {
+  stop("All coefficients were shrunk to zero at lambda.min; nothing to plot.")
+}
+
+# Order by absolute value and take top 20
+# ... all your code above unchanged ...
+
+# Order by absolute value and take top 20
+coef_df$abs_coef <- abs(coef_df$coef)
+coef_df <- coef_df[order(-coef_df$abs_coef), ]
+top_k <- head(coef_df, 20)
+
+# more bottom margin so we can put the x-label under the vertical names
+par(mar = c(13, 4, 4, 2) + 0.1)
+
+bp <- barplot(
+  height    = top_k$coef,
+  names.arg = top_k$feature,
+  las       = 2,
+  main      = "LPM (Lasso) – Top 20 Non-Zero Coefficients",
+  ylab      = "Coefficient (effect on P(Malignant))",
+  xlab      = ""      # no x-label here
+)
+
+abline(h = 0, lty = 2)
+
+# put x-label BELOW the feature names
+mtext("Feature", side = 1, line = 11)
+
+
+```
+
+tree
+```{r}
+library(rpart.plot)
+
+# Get the trained GraphLearner from the AutoTuner
+tree_gl <- at_tree$learner
+
+# The last element in the graph is the rpart learner
+tree_node  <- tail(tree_gl$model, 1)[[1]]
+tree_rpart <- tree_node$model     # rpart object
+
+rpart.plot(
+  tree_rpart,
+  type   = 2,     # labels under nodes
+  extra  = 104,   # class, prob, and n
+  under  = TRUE,
+  faclen = 0,
+  main   = "Decision Tree – Skin Cancer Classification"
+)
+
+```
+
+
+rf
+```{r}
+library(ranger)
+
+# Use your preprocessed training data
+rf_imp_data <- train
+
+# Drop ID (not a predictor)
+rf_imp_data$ID <- NULL
+
+# Ensure Cancer is a factor
+rf_imp_data$Cancer <- as.factor(rf_imp_data$Cancer)
+
+set.seed(17)
+rf_imp_model <- ranger(
+  formula     = Cancer ~ .,
+  data        = rf_imp_data,
+  num.trees   = 500,
+  importance  = "impurity",  # <-- this guarantees variable.importance
+  na.action   = "na.omit",   # okay for interpretation plot
+  probability = TRUE
+)
+
+# Variable importance from this standalone ranger model
+rf_imp <- rf_imp_model$variable.importance
+
+rf_imp_df <- data.frame(
+  feature    = names(rf_imp),
+  importance = as.numeric(rf_imp)
+)
+
+rf_imp_df <- rf_imp_df[order(-rf_imp_df$importance), ]
+top20 <- head(rf_imp_df, 20)
+
+par(mar = c(13, 4, 4, 2) + 0.1)   # <-- longer bottom
+
+bp <- barplot(
+  height    = top20$importance,
+  names.arg = top20$feature,
+  las       = 2,
+  main      = "Random Forest – Top 20 Variable Importances",
+  ylab      = "Importance",
+  xlab      = ""    # leave blank so we can position manually
+)
+
+# x-axis label BELOW the vertical feature names
+mtext("Feature", side = 1, line = 11)
+
+
+```
+“For interpretability, we also fit a separate random forest using the ranger package with impurity-based variable importance to visualize the most influential predictors. The tuned mlr3 random forest uses similar settings but is primarily evaluated on predictive performance.”
+
+xgb
+```{r}
+library(xgboost)
+
+# Trained XGBoost GraphLearner from AutoTuner
+xgb_gl    <- at_xgb$learner
+xgb_node  <- tail(xgb_gl$model, 1)[[1]]
+xgb_model <- xgb_node$model   # xgb.Booster
+
+xgb_imp <- xgboost::xgb.importance(model = xgb_model)
+
+top_k <- head(xgb_imp, 20)
+
+par(mar = c(13, 4, 4, 2) + 0.1)   # <-- longer bottom
+
+bp <- barplot(
+  height    = top_k$Gain,
+  names.arg = top_k$Feature,
+  las       = 2,
+  main      = "XGBoost – Top 20 Features by Gain",
+  ylab      = "Gain",
+  xlab      = ""    # we manually add this below
+)
+
+# x-axis label pushed far down
+mtext("Feature", side = 1, line = 11)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
