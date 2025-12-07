@@ -208,12 +208,22 @@ lrn_rf2 <- as_learner(
     po("encode",  method = "one-hot") %>>%
     lrn("regr.ranger",
         num.trees = to_tune(50, 200),
-        min.node.size = to_tune(1, 10)
+        min.node.size = to_tune(1, 10),
+        mtry = to_tune(1, 8)
     )
 )
 
+at_rf2 <- auto_tuner(
+  learner = lrn_rf2,
+  resampling = rsmp("cv", folds = 5),       
+  measure = msr("regr.rmse"),               
+  tuner = tnr("grid_search"),            
+  terminator = trm("evals", n_evals = 20)   
+)
+
 # train model
-lrn_rf2$train(task = housing_tsk, row_ids = train_idx)
+at_rf2$train(task = housing_tsk, row_ids = train_idx)
+best_params <- at_rf2$tuning_result
 
 # test model
 preds5 <- lrn_rf2$predict(housing_tsk, row_ids = test_idx)
