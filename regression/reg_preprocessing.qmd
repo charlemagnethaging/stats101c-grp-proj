@@ -169,7 +169,8 @@ purchases <- purchases |> select(!c(title, asin.isbn.product.code, category)) |>
 ```{r}
 #| label: flatten purchases data
 
-## create category frequency per id
+## create category freq per id
+# n.distinct.categories
 
 cat_freq_by_id <- purchases |>
 	group_by(survey.response.id) |>
@@ -183,7 +184,8 @@ cat_freq_by_id <- purchases |>
 		values_from = "share",
 		names_prefix = "freq_",
 		values_fill = 0 # default behavior would fill unpurchased-from categories with NA
-	)
+	) |> rowwise() |> 
+    mutate(n.distinct.categories = sum(c_across(starts_with("freq_")) > 0), .after="survey.response.id")
 
 ## top shipping address state for each ID
 
@@ -200,14 +202,21 @@ top_destination_state_by_id <- purchases |>
 
 ## summarize spending data
 
-# summarize the total spent by the user
+# summarize total.spent by the user
 # and the average amount spent per order for the user
+# and total.order.count
 purchases <- purchases |>
 	group_by(survey.response.id, order.date) |>
-	summarize(order.price = sum(purchase.price.per.unit * quantity)) |> # sum prices in a day
+	summarize(order.price = sum(purchase.price.per.unit * quantity),
+            n.orders=n()) |> # sum prices & orders in a day per-user
 	group_by(survey.response.id) |>
-	summarize(total.spent = sum(order.price), avg.order.price = mean(order.price), .groups='drop')
+	summarize(
+    total.spent = sum(order.price), 
+    total.orders = sum(n.orders),
+    avg.order.price = mean(order.price), 
+    .groups='drop')
 
+## add cols for total spend per category?
 
 ## merge category and address data into spending
 
@@ -241,105 +250,3 @@ save(train_data, file = "processed_data_train.RData")
 save(test_data, file = "processed_data_test.RData")
 ```
 
-
-```{r old}
-#| label: superceded preprocessing
-#| eval: false
-
-# the top 5 categories for each ID 
-top_categories_by_id <- purchases %>%
-  group_by(survey.response.id, category) %>%
-  summarise(n = n(), .groups = 'drop_last') %>%
-  arrange(desc(n)) %>%
-  slice_head(n = 5) %>%
-  summarise(top.categories = paste(category, collapse = ", ")) %>%
-  ungroup()
-
-## hot encoding for the multiple top categories variable 
-data <- data %>%
-  mutate(
-    category.media = ifelse(
-      str_detect(top.categories, 
-        regex("Media", ignore_case = TRUE)), 
-      1, 0),
-    category.games = ifelse(
-      str_detect(top.categories, 
-        regex("Games", ignore_case = TRUE)), 
-      1, 0),
-    category.clothing = ifelse(
-      str_detect(top.categories, 
-        regex("Clothing", ignore_case = TRUE)), 
-      1, 0),
-    category.pet = ifelse(
-      str_detect(top.categories, 
-        regex("Pet", ignore_case = TRUE)), 
-      1, 0),
-    category.food = ifelse(
-      str_detect(top.categories, 
-        regex("Food", ignore_case = TRUE)), 
-      1, 0),
-    category.beauty = ifelse(
-      str_detect(top.categories, 
-        regex("Beauty", ignore_case = TRUE)), 
-      1, 0),
-    category.electronics = ifelse(
-      str_detect(top.categories, 
-        regex("Electronics", ignore_case = TRUE)), 
-      1, 0),
-    category.home = ifelse(
-      str_detect(top.categories, 
-        regex("Home", ignore_case = TRUE)), 
-      1, 0),
-    category.fitness = ifelse(
-      str_detect(top.categories, 
-        regex("Fitness", ignore_case = TRUE)), 
-      1, 0),
-    category.health = ifelse(
-      str_detect(top.categories, 
-        regex("Health", ignore_case = TRUE)), 
-      1, 0),
-    category.stationery = ifelse(
-      str_detect(top.categories, 
-        regex("Stationery", ignore_case = TRUE)), 
-      1, 0),
-    category.other = ifelse(top.categories == "Other", 1, 0)
-  )
-
-## drop the column we encoded
-data <- data %>%
-  select(setdiff(colnames(data),c("top.categories")))
-
-## convert all character and logical variables to factors
-data <- data %>%
-  mutate(
-    across(where(is.character), as.factor),
-    across(where(is.logical), as.factor)
-  )
-
-# data without the id, test, and the duplicate state variable
-preprocessed_data <- data %>% select(setdiff(colnames(data), c("survey.response.id", "test", "q.demos.state")))
-
-# save the data into the directory
-save(preprocessed_data, file = "preprocessed_data.RData")
-
-## handle missing data
-imputation_pipeline <- gunion(list(
-  # numeric features: regression tree imputation
-  po("select", id = "sel_num", selector = selector_type("numeric")) %>>%
-    po("imputelearner", id = "imp_num", learner = lrn("regr.rpart")),
-  # factor / ordered features: classification tree imputation
-  po(
-    "select",
-    id = "sel_cat",
-    selector = selector_type(c("factor", "ordered"))
-  ) %>>%
-    po("imputelearner", id = "imp_cat", learner = lrn("classif.rpart")),
-  # everything else (IDs, dates, etc.) just passed through
-  po(
-    "select",
-    id = "sel_rest",
-    selector = selector_invert(selector_type(c("numeric", "factor", "ordered")))
-  )
-)) %>>%
-  po("featureunion")
-```
