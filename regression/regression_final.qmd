@@ -24,30 +24,31 @@ library(glmnet)
 
 ```{r}
 # Load data
-load("data/regression/joined_data.RData")
+load("processed_data_train.RData")
 ```
 
 ## Introduction 
 Research shows that factors such as income, age, gender, and household composition often influence spending behavior and product choice (U.S. Bureau of Labor Statistics). This background makes us interested to see if online spending is associated with variables such as income, education, age, and household sizes. The household size could be associated with how often and how many products are typically purchased but the different demographics of the customer or household could be associated with the purchase category. Personal habits and factors related to personal health could also place an influential role in purchasing behavior. These variables are all plausible predictors of online spending behavior.
 
 ## Exploratory Data Analysis
-As we explored potential relationships between the variables, notable patterns were discovered and some failed to showed. Our findings are presented below: 
+As we explored potential relationships between the variables in the training dataset, notable patterns were discovered and some failed to show. Our findings are presented below: 
 
 ### Response (HH Size) Distribution
 
 ```{r, fig.width=10, fig.height=6}
-data <- data |> drop_na(q.amazon.use.hh.size)
+set_theme(theme_minimal())
 
-ggplot(data, aes(x = q.amazon.use.hh.size)) +
-  geom_bar(fill = "blue", na.rm=TRUE) +
-  labs(title = "Distribution of Housing Size (Numeric)",
-       x = "Housing Size (Numeric)",
+ggplot(data, aes(x = q.amazon.use.hh.size.num, fill=q.amazon.use.hh.size.num, group=as.factor(q.amazon.use.hh.size.num))) +
+  geom_bar() +
+  scale_fill_gradient(low="#ccebc5", high="#08589e") +
+  labs(title = "Distribution of Housing Size",
+       x = "Housing Size",
        y = "Count"
        ) +
-  theme_minimal()
+  theme(legend.position="none")
 ```
 
-Just looking at the distribution of housing sizes, we see that it's more common for households to have a size of 2, then 4+, and a size of 1 or 3 share the same frequency. Since household sizes of 4 and more are represented by only one variable, it's difficult to tell what the breakdown of household sizes are within that variable, but it's clear that having a large family, where large is defined by 4 or more, is more frequent than a family size of 1 or 3. 
+Just looking at the distribution of housing sizes, we see that it's most common for households to have a size of 2, with size 4+ or 1 the second most frequent, and a size of 3 having the lowest frequency. Since household sizes of 4 and more are represented by only one variable, it's difficult to tell what the breakdown of household sizes are within that variable. 
 
 ### Numeric Variable Correlation
 
@@ -74,143 +75,63 @@ ggplot(cor_long, aes(Var1, Var2, fill = Freq)) +
 
 From our correlation heat map, we notice that all the numerical variables do not show any kind of correlation among each other. Surprisingly the amount of products purchased and the number of users per amazon account doesn't have any correlation to the household size. The variable interactions seem to be statistically negligible in terms of a linear relationship. 
 
-### Age vs. Response
-
-```{r, fig.width=10, fig.height=6} 
-# Convert age ranges to numeric midpoints
-age_data <- data %>%
-  mutate(
-    q.demos.age = case_when(
-      q.demos.age == "18 - 24 years" ~ (18 + 24)/2,
-      q.demos.age == "25 - 34 years" ~ (25 + 34)/2,
-      q.demos.age == "35 - 44 years" ~ (35 + 44)/2,
-      q.demos.age == "45 - 54 years" ~ (45 + 54)/2,
-      q.demos.age == "55 - 64 years" ~ (55 + 64)/2,
-      q.demos.age == "65 and older" ~ 70, 
-      TRUE ~ NA_real_
-    )
-  )
-
-# Define age groups for faceting
-age_data <- age_data %>%
-  mutate(Age.Group = cut(q.demos.age, 
-                         breaks = c(18, 25, 35, 45, 55, 65, 100), 
-                         labels = c("18-24","25-34","35-44","45-54","55-64","65+"),
-                         right = FALSE))
-
-ggplot(age_data, aes(x = q.amazon.use.hh.size.num, 
-                     y = Purchase.Price.Per.Unit * Quantity, 
-                     fill = factor(q.amazon.use.hh.size.num))) +
-  geom_boxplot() +
-  facet_wrap(~Age.Group) +
-  labs(title = "Spending by Household Size Across Age Groups", 
-       x = "Household Size", 
-       y = "Spending per Transaction") +
-  theme_minimal()
-```
-
-After looking at how different household sizes and age ranges spend money, we noticed that all household sizes tend to have the same distribution of spending habits and those within the 25-34 range tend to spend the most and only as a household of 1. Similarly those within the 45-54 range also spend a lot for a household of 3. From this visual, age is definitely a strong predictor.
 
 ### Location
 
 ```{r, fig.width=10, fig.height=6}
-ggplot(data, aes(x = shipping.address.state, y = q.amazon.use.hh.size.num)) +
-  stat_summary(fun = "mean", geom = "bar") +
-  labs(title = "Average Housing Size by State",
-       x = "State", y = "Mean Housing Size") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggplot(data, aes(y = fct_rev(fct_infreq(shipping.address.state)))) +
+	geom_bar(fill = "#7ec17bff") +
+	labs(
+		title = "Distribution of Shipping Address",
+		y = "Shipping Address State"
+	)
+
+# top_25_states <- data |>
+# 	count(shipping.address.state) |>
+# 	slice_max(n, n = 25) |>
+# 	pull(shipping.address.state)
+
+# # plot distr hhsize for top 25 states
+# data |>
+# 	filter(shipping.address.state %in% top_25_states) |>
+# 	ggplot(aes(y = fct_rev(fct_infreq(shipping.address.state)), x = q.amazon.use.hh.size.num)) +
+# 	geom_violin() +
+# 	labs(title = "Average Housing Size by State", y = "State", x = "Mean Housing Size")
+
+# diff attempt at plotting per-state distr of hhsize
+state_order <- data %>%
+  group_by(shipping.address.state) %>%
+  summarize(prop_size_1 = mean(q.amazon.use.hh.size.num == 1)) %>% 
+  arrange(desc(prop_size_1)) %>%  # Use desc(prop_size_2) if you want top-to-bottom
+  pull(shipping.address.state)
+
+data |> mutate(shipping.address.state = factor(shipping.address.state, levels = state_order)) |> 
+  ggplot(aes(
+		x = shipping.address.state,
+		fill = q.amazon.use.hh.size.num,
+		group = as.factor(q.amazon.use.hh.size.num)
+)) +
+	geom_bar(position = position_fill(reverse = TRUE)) +
+	scale_fill_gradient(low="#ccebc5", high="#08589e") +
+	coord_flip() +
+	labs(y = "Proportion", x = "Shipping Address", fill = "HH Size")
 ```
 
 Interested in seeing if the state/location would show any noticeable patterns in the housing size, our visual showed that the state doesn't seem to make a difference on the average housing size. This suggests that more populated states might not be very important to consider in our final model. Most states tend to average around 2 to 3 for their household size. Hawaii surprisingly shows the highest average while Puerto Rico shows the smallest, yet they are both very small territories.  
 
-### Substance Use
-
-#### Cigarettes
-
-```{r, fig.width=10, fig.height=6}
-ggplot(data, aes(x = q.substance.use.cigarettes, y = q.amazon.use.hh.size.num, fill = q.substance.use.cigarettes)) +
-  geom_boxplot() +
-  labs(title = "Housing Size by Cigarette Use Behavior",
-       x = "Cigarette Use category",
-       y = "Housing Size") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-```
-
-Customers that have stopped cigarette use in the past tend to average around a household size of 2 but the IQR of the boxplot spans from 1 to 3 for the household size. Customers that do not use cigarettes tend to average around a household size of 2 but the IQR of the boxplot spans up to 4 for the household size. Customers that prefer not to share average around a household size of 2 but the IQR of the boxplot spans up to 3 for the household size. Customers that do use cigarettes tend to average around a household size of 3 but the IQR of the boxplot spans from 2 to 4 for the household size. Based on the medians of the boxplots, active cigarette users usually have a larger household size, but non cigarette users have a right skewed distribution towards having a larger household size. 
-
-```{r, fig.width=10, fig.height=6}
-behavior_data <- data %>%
-  select(q.substance.use.cigarettes,
-         q.substance.use.alcohol,
-         q.substance.use.marijuana,
-         q.amazon.use.hh.size.num) %>%
-  pivot_longer(
-    cols = starts_with("q.substance.use"),
-    names_to = "Behavior",
-    values_to = "Response"
-  )
-
-ggplot(behavior_data, aes(x = Response, y = q.amazon.use.hh.size.num, fill = Response)) +
-  geom_boxplot() +
-  facet_wrap(~Behavior, scales = "free_x") +
-  labs(
-    title = "Housing Size Across Multiple Behavioral Factors",
-    x = "Response",
-    y = "Housing Size"
-  ) +
-  theme_minimal()
-```
-
-After seeing the results of cigarette use in the household on the household size, we wanted to see if that pattern would be the same for other drug use variables. We notice that this was the case and the customers that did not use any drugs showed again as having the right skew trend of having larger families with a median of 2. Alcohol users had the same pattern as non-users but those that used marijuana showed had a smaller IQR that went up to a household size of 3. Across all panels, users that stopped drug use in the past still have the same observed results as the previous plot. Those who prefer to not say either had a median size of 2 or would have a right skewed distribution with the IQR going up to a size of 3. Based on this combined visual, none of the three drug use behaviors are strong predictors of housing size
-  
-### Income
-
-```{r, fig.width=10, fig.height=6}
-ggplot(data, aes(x = q.amazon.use.hh.size.num, fill = q.demos.income)) +
-  geom_bar(position = "dodge") +
-  labs(
-    title = "Counts of Housing Sizes, Broken Down by Income Range",
-    x = "Housing Size",
-    y = "Count",
-    fill = "Income Range"
-  ) +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 0))
-```
-
-We assumed that larger household sizes would most likely make a larger income. We do see that household sizes of 4 or more frequently make an income within 100-150K but those that make 150K or more are not the most frequent income range to have large families. The same pattern is seen for household sizes of 2. The majority of those that are a household size of 1 had an income under 75K, which was expected. However, across all income ranges, those that had a household size of 3 had somewhat similar frequencies in their income ranges, and surprisingly, those making 50-75K was the most frequent. 
-
 ### Product Categories
 
 ```{r}
-# Top 10 most frequent categories
-N <- 10
-top_categories <- data %>%
-  count(category, sort = TRUE) %>% 
-  slice_head(n = N) %>%            
-  pull(category)                   
+# plot correlated cat frequencies against hhsize
 
-top_categories_data <- data %>%
-  filter(category %in% top_categories)
+ggplot(
+  data |> filter(freq_Toys_and_Hobbies > 0), 
+  aes(x = q.amazon.use.hh.size.num, y = freq_Toys_and_Hobbies)) +
+	geom_jitter(alpha = 0.5)
 
-summary_categories <- top_categories_data %>%
-  group_by(category) %>%
-  summarize(
-    mean_size = mean(q.amazon.use.hh.size.num, na.rm = TRUE),
-    se = sd(q.amazon.use.hh.size.num, na.rm = TRUE) / sqrt(n())
-  )
-
-ggplot(summary_categories, aes(x = reorder(category, mean_size), y = mean_size)) +
-  geom_point(size = 3) +
-  geom_errorbar(aes(ymin = mean_size - 1.96*se,
-                    ymax = mean_size + 1.96*se),
-                width = 0.2) +
-  coord_flip() +
-  labs(
-    title = "Mean Housing Size by Most Common Product Categories",
-    x = "Product Categories",
-    y = "Mean Housing Size"
-  )
+ggplot(data |> filter(freq_Baby_Product > 0), 
+aes(x = q.amazon.use.hh.size.num, y = freq_Baby_Product)) +
+	geom_jitter(alpha = 0.5)
 ```
 
 Certain households would be more likely to purchase products from specific product categories like households with children would be like to purchase products related to toys. Looking at the top 10 purchased product categories, household sizes closer to 3 purchase from these categories, but we noticed that the pet food category showed a household size closer to 2. This makes us believe that there could be certain categories that may be able to predict smaller household sizes better than others. 
