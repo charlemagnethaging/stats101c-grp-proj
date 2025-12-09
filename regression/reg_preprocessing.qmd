@@ -216,13 +216,20 @@ purchases <- purchases |>
     avg.order.price = mean(order.price), 
     .groups='drop')
 
-## add cols for total spend per category?
-
 ## merge category and address data into spending
 
 purchases <- purchases |>
   left_join(top_destination_state_by_id, by = "survey.response.id") |> 
 	left_join(cat_freq_by_id, by = "survey.response.id") 
+
+## add cols for total spend per category
+
+purchases <- purchases %>%
+  mutate(across(
+    starts_with("freq_"),
+    ~ .x * total.spent,
+    .names = "{str_replace(.col, 'freq_', 'spend_')}"
+  ))
 ```
 
 
