@@ -2,7 +2,7 @@
 title: "Stats 101C Regression Final"
 author: "Group 13"
 date: "`r Sys.Date()`"
-output:
+format:
   pdf:
     toc: true
     toc_depth: 3
