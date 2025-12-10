@@ -240,4 +240,146 @@ rr1$aggregate(measures = msrs(c("time_train", "time_predict", "time_both", "regr
 ```
 
 
+# Maureen Random Forest Model ----------------------------------------------------
 
+## Hyperparameter optimization: Random Forest model
+```{r}
+source("random_forest_model.R")
+at$tuning_result
+```
+
+Thus, the best hyperparameter for our random forest model is:
+
+- num.trees: 618
+
+- mtry: 4
+
+- min.node.size: 11
+
+- sample.fraction: 0.8449092
+
+## Final model
+
+```{r}
+source("rf_final_model.R")
+# Load final model and predictions saved earlier
+final_model <- readRDS("rf_model_final.rds")
+preds_final <- readRDS("rf_predictions_final.rds")
+
+# Define measures
+measures <- list(
+  msr("regr.rmse"),
+  msr("regr.mae"),
+  msr("regr.mse")
+)
+
+# Print performance
+scores <- preds_final$score(measures)
+scores
+
+```
+
+## Model interpretation: how your model can explain individual predictions it makes
+
+```{r}
+load("processed_data_train.RData")
+final_model <- readRDS("rf_model_final.rds")
+
+set.seed(101)
+housing_tsk <- as_task_regr(train_data, target = "q.amazon.use.hh.size.num")
+split     <- partition(housing_tsk, ratio = 0.8)
+train_idx <- split$train
+test_idx  <- split$test
+
+X_test <- housing_tsk$data(
+  rows = test_idx,
+  cols = housing_tsk$feature_names
+)
+y_test <- housing_tsk$data(
+  rows = test_idx,
+  cols = housing_tsk$target_names
+)[[1]]
+
+pred_fun <- function(model, newdata) {
+  model$predict_newdata(newdata)$response
+}
+
+predictor <- Predictor$new(
+  model = final_model,
+  data  = X_test,
+  y     = y_test,
+  predict.function = pred_fun
+)
+
+# pick some interesting test points (rows within X_test)
+example_ids <- c(1, 20)
+
+# see their predictions for context
+final_model$predict_newdata(X_test[example_ids, ])
+
+# LocalModel = LIME-style local surrogate
+set.seed(101)
+loc_1 <- LocalModel$new(predictor, x.interest = X_test[example_ids[1], ], k = 5)
+loc_2 <- LocalModel$new(predictor, x.interest = X_test[example_ids[2], ], k = 5)
+
+# plots: contribution of top features for each case
+plot(loc_1)
+plot(loc_2)
+
+```
+
+## Show predictions
+
+```{r}
+# Load test data 
+load("processed_data_test.RData")
+
+# Get predictions on new data
+preds_test <- final_model$predict_newdata(newdata = test_data)
+
+# Turn predictions into a data.table 
+preds_dt <- as.data.table(preds_test)
+
+submission <- data.frame(
+  Survey.ResponseID        = test_data$survey.response.id,
+  Q.amazon.use.hh.size.num = preds_dt$response
+)
+class(submission)
+
+write.csv(submission, "hh_size_predictions_final.csv", row.names = FALSE)
+```
+
+## Variable importance
+
+```{r}
+importance <- final_model$importance()
+class(importance)   # should be "numeric"
+str(importance)
+
+vip_df <- data.frame(
+  variable   = names(importance),
+  importance = as.numeric(importance)
+)
+
+# sort by importance, descending
+vip_df <- vip_df[order(-vip_df$importance), ]
+# drop survey.response.id
+vip_df <- vip_df[vip_df$variable != "survey.response.id", ]
+
+library(ggplot2)
+
+ggplot(vip_df[1:15, ], aes(x = reorder(variable, importance), y = importance)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(
+    title = "Top 15 Most Important Variables (Random Forest)",
+    x = "Predictor",
+    y = "Impurity-based Importance"
+  ) +
+  theme_minimal()
+
+
+
+```
+
+# End of Maureen Random Forest Model ----------------------------------------------------
