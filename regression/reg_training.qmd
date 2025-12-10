@@ -443,7 +443,7 @@ sub_2_df <- cbind(tsk_hhsize_test$row_names, submission_2$response) |>
 write_csv(sub_2_df, "submissions/charlie_submission_2.csv")
 ```
 
-### xgb_tune_4
+### xgb_tune_4 (WINNER)
 try one-hot instead of impact encoding
 ```{r}
 # reset features
@@ -456,10 +456,6 @@ lrn_xgb <- as_learner(
 	po("encode", method = "one-hot") %>>%
 		lrn(
 			"regr.xgboost",
-			objective = "reg:absoluteerror", # changed here
-			nrounds = 1000,
-			early_stopping_rounds = 20,
-			validate = "predefined",
 
 			# tuning space #2
 			eta = to_tune(1e-4, 1, logscale = TRUE),
@@ -470,7 +466,7 @@ lrn_xgb <- as_learner(
 			alpha = to_tune(1e-3, 1e3, logscale = TRUE)
 		)
 )
-lrn_xgb$validate <- 0.2
+
 
 set.seed(13)
 plan(list(
@@ -481,9 +477,9 @@ plan(list(
 instance = ti(
 	task = tsk_hhsize,
 	learner = lrn_xgb,
-	resampling = rsmp("cv", folds = 3),
-	measure = msr("regr.mae"),
-	terminator = trm("evals", n_evals = 100)
+	resampling = rsmp("cv", folds = 5),
+	measure = msr("regr.rmse"),
+	terminator = trm("evals", n_evals = 60)
 )
 
 tuner_rs$optimize(instance)
@@ -493,7 +489,7 @@ best_params <- instance$result_learner_param_vals
 xgb_tune4 <- lrn_xgb$clone()
 xgb_tune4$param_set$values <- best_params
 
-hhsize_split <- partition(tsk_hhsize, ratio=0.8) 
+hhsize_split <- partition(tsk_hhsize, ratio=0.7) 
 xgb_tune4$train(tsk_hhsize, row_ids = hhsize_split$train)
 
 # var importance plot sanity check
@@ -505,7 +501,6 @@ as_tibble(xgb_tune4$importance(), rownames="var") |> ggplot() +
 preds <- xgb_tune4$predict(tsk_hhsize, row_ids = hhsize_split$test)
 preds$score(c(msr("regr.rmse"), msr("regr.mae")))
 
-mean(round(preds$response) == preds$truth)
 xgb_tune4$param_set$values
 ```
 
@@ -514,22 +509,19 @@ $encode.method
 [1] "one-hot"
 
 $regr.xgboost.alpha
-[1] 0.3191804
+[1] 5.468666
 
 $regr.xgboost.colsample_bytree
-[1] 0.5973353
-
-$regr.xgboost.early_stopping_rounds
-[1] 20
+[1] 0.319908
 
 $regr.xgboost.eta
-[1] 0.02444362
+[1] 0.007055363
 
 $regr.xgboost.lambda
-[1] 5.458281
+[1] 0.08740375
 
 $regr.xgboost.max_depth
-[1] 2
+[1] 4
 
 $regr.xgboost.nrounds
 [1] 1000
@@ -537,11 +529,11 @@ $regr.xgboost.nrounds
 $regr.xgboost.nthread
 [1] 1
 
-$regr.xgboost.objective
-[1] "reg:absoluteerror"
-
 $regr.xgboost.subsample
-[1] 0.546549
+[1] 0.369098
+
+$regr.xgboost.verbose
+[1] 0
 
 keep_features: all
 
@@ -555,7 +547,6 @@ sub_3 <- xgb_tune4$predict(tsk_hhsize_test)
 sub_3_df <- cbind(tsk_hhsize_test$row_names, sub_3$response) |> 
   as_tibble() |> 
   select(!row_id) |> 
-  mutate(V2 = round(V2)) |> 
   rename(Survey.ResponseID = row_name, Q.amazon.use.hh.size.num = V2)
 
 write_csv(sub_3_df, "submissions/charlie_submission_3.csv")
@@ -671,7 +662,7 @@ lrn_rf <- as_learner(
 instance_rf <- ti(
   task = tsk_hhsize,
   learner = lrn_rf,
-  resampling = rsmp("cv", folds = 3),
+  resampling = rsmp("cv", folds = 5),
   measure = msr("regr.rmse"),
   terminator = trm("evals", n_evals = 60)
 )
@@ -757,5 +748,4 @@ bmr$aggregate(measures = msrs(c("regr.mse", "regr.rmse")))
 ```
 
 
-
-## GAM fitting
+# 

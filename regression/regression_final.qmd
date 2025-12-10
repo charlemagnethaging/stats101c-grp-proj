@@ -27,7 +27,8 @@ library(glmnet)
 load("processed_data_train.RData")
 ```
 
-## Introduction 
+# Introduction 
+
 Research shows that factors such as income, age, gender, and household composition often influence spending behavior and product choice (U.S. Bureau of Labor Statistics). This background makes us interested to see if online spending is associated with variables such as income, education, age, and household sizes. The household size could be associated with how often and how many products are typically purchased but the different demographics of the customer or household could be associated with the purchase category. Personal habits and factors related to personal health could also place an influential role in purchasing behavior. These variables are all plausible predictors of online spending behavior.
 
 ## Exploratory Data Analysis
