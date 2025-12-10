@@ -7,35 +7,21 @@ library(mlr3pipelines)
 library(ggplot2)
 library(xgboost)
 library(dplyr)
-library(rpart)
 library(broom)
 library(glmnet)
-library(stringr)
-library(janitor)
-library(mlr3viz)
 library(ranger)  # backend for regr.ranger (usually pulled in by mlr3learners, but safe)
 
 load("processed_data_train.RData")  # this should create train_data
-## handle missing data
-imputation_pipeline <- gunion(list(
-  # numeric features: regression tree imputation
-  po("select", id = "sel_num", selector = selector_type("numeric")) %>>%
-    po("imputelearner", id = "imp_num", learner = lrn("regr.rpart")),
-  # factor / ordered features: classification tree imputation
-  po(
-    "select",
-    id = "sel_cat",
-    selector = selector_type(c("factor", "ordered"))
-  ) %>>%
-    po("imputelearner", id = "imp_cat", learner = lrn("classif.rpart")),
-  # everything else (IDs, dates, etc.) just passed through
-  po(
-    "select",
-    id = "sel_rest",
-    selector = selector_invert(selector_type(c("numeric", "factor", "ordered")))
-  )
-)) %>>%
-  po("featureunion")
+train_data <- train_data[ , !(names(train_data) %in% c("survey.response.id",
+                                                       "total.orders",
+                                                       "n.distinct.categories")) ]
+
+load("processed_data_test.RData") # this should create test_data
+# store the test id values to merge into submission cv later 
+ids <- test_data$survey.response.id
+test_data <- test_data[ , !(names(test_data) %in% c("survey.response.id",
+                                                       "total.orders",
+                                                       "n.distinct.categories")) ]
 
 # defining the task
 housing_tsk <- as_task_regr(train_data, target = "q.amazon.use.hh.size.num")
@@ -47,7 +33,7 @@ train_idx <- split$train
 test_idx  <- split$test
 
 # measures
-measures <- list(msr("regr.rmse"), msr("regr.mae"), msr("regr.mse"))
+measures <- list(msr("regr.rmse"), msr("regr.mse"))
 
 # ## lasso
 # mod_mat <- model.matrix(~ ., data = preprocessed_data)
@@ -65,166 +51,177 @@ measures <- list(msr("regr.rmse"), msr("regr.mae"), msr("regr.mse"))
 # lrn_lasso_cv$train(lasso_housing_tsk)
 # coef(lrn_lasso_cv$model)
 
-# ## -----------------------------------------------------------
-# # xgbost learner
-# lrn_xgboost <- as_learner(
-#   imputation_pipeline %>>%
-#     po("encode",  method = "one-hot") %>>%
-#     lrn("regr.xgboost",
-#         eta = 0.1,
-#         max_depth = 3,
-#         colsample_bytree = 0.8,
-#         colsample_bylevel = 0.8,
-#         lambda = 1,
-#         alpha = 0,
-#         subsample = 0.8
-#     )
-# )
 
-# # training the model
-# lrn_xgboost$train(housing_tsk, row_ids = train_idx)
-# # testing the model
-# preds <- lrn_xgboost$predict(housing_tsk, row_ids = test_idx)
-# preds
-# preds$score(measures)
-
-
-# ## -----------------------------------------------------------
-# # xgbost learner 2
-# lrn_xgboost2 <- as_learner(
-#   imputation_pipeline %>>%
-#     po("encode",  method = "one-hot") %>>%
-#     lrn("regr.xgboost",
-#         eta = to_tune(1e-4, 1, logscale =TRUE),
-#         max_depth = to_tune(1, 10),
-#         colsample_bytree = to_tune(1e-1, 1),
-#         colsample_bylevel = to_tune(1e-1, 1),
-#         lambda = to_tune(1e-3, 1e3, logscale =TRUE),
-#         alpha = to_tune(1e-3, 1e3, logscale =TRUE),
-#         subsample = to_tune(1e-1, 1)
-#     )
-# )
-
-# # 5-fold cross-validation resampling method 
-# resampling <- rsmp("cv", folds = 5)
-
-# # terminating condition
-# terminator <- trm("evals", n_evals = 20)
-
-# # grid search tuner
-# tuner_grid <- tnr("grid_search", resolution = 3) 
-
-# # autoturner
-# at_xgboost <- auto_tuner(
-#   learner = lrn_xgboost2,
-#   resampling = resampling,
-#   measure = msr("regr.rmse"),
-#   terminator = terminator,
-#   tuner = tuner_grid
-# )
-
-# # tune & train the model
-# at_xgboost$train(housing_tsk, row_ids = train_idx)
-# at_xgboost$tuning_result
-
-# # test the model
-# preds2 <- at_xgboost$predict(housing_tsk, row_ids = test_idx)
-# preds2$score(measures)
-
-# ## -----------------------------------------------------------
-# # xgbost learner 3
-# lrn_xgboost3 <- as_learner(
-#   imputation_pipeline %>>%
-#     po("encode",  method = "one-hot") %>>%
-#     lrn("regr.xgboost",
-#         eta = to_tune(1e-4, 1, logscale =TRUE),
-#         max_depth = to_tune(1, 20),
-#         colsample_bytree = to_tune(1e-1, 1),
-#         colsample_bylevel = to_tune(1e-1, 1),
-#         lambda = to_tune(1e-3, 1e3, logscale =TRUE),
-#         alpha = to_tune(1e-3, 1e3, logscale =TRUE),
-#         subsample = to_tune(1e-1, 1)
-#     )
-# )
-
-# # tuning instance
-# set.seed(101)
-# instance <- ti(task = housing_tsk, 
-#   learner = lrn_xgboost3,
-#   resampling = rsmp("cv", folds = 5),
-#   measures = list(msr("regr.rmse"), msr("regr.mae"), msr("regr.mse")),
-#   terminator = trm("evals", n_evals = 100)
-# )
-
-# # grid search
-# tuner <- tnr("grid_search", resolution = 10) 
-# tuner$optimize(inst = instance)
-
-# # define learner
-# lrn_rpart_tuned <- lrn("regr.rpart")
-# # optimal parameters
-# instance$result
-# optimal_params <- instance$result_learner_param_vals
-# # set optimal hyperparamters 
-# lrn_rpart_tuned$param_set$values <- optimal_params
-# # train the fit parameters
-# lrn_rpart_tuned$train(housing_tsk, row_ids = train_idx)
-# # test the model
-# preds3 <- lrn_rpart_tuned$predict(housing_tsk, row_ids = test_idx)
-# preds3
-# preds3$score(measures)
-
-
-# ## random forest learner -----------------------------------------------------
-# lrn_rf1 <- as_learner(
-#   imputation_pipeline %>>%
-#     # drop encode() because ranger handles factors,
-#     # but if we want to keep one-hot, uncomment next line:
-#     # po("encode", method = "one-hot") %>>%
-#     lrn(
-#       "regr.ranger",
-#       num.trees = to_tune(200, 800),
-#       min.node.size = to_tune(1, 10),
-#       sample.fraction = 0.8,
-#       importance      = "impurity"
-#     )
-# )
-
-# ## train RF 
-# lrn_rf1$train(housing_tsk, row_ids = train_idx)
-
-# ## test RF 
-# preds4 <- lrn_rf$predict(housing_tsk, row_ids = test_idx)
-# preds4$score(measures)
-
-# ## save RF model + preds -----------------------------------------------------
-# saveRDS(lrn_rf, "rf_model.rds")
-# saveRDS(preds,  "rf_predictions.rds")
-
-## For Trevor
-## rf learner 2 ---------------------------------------------------
-lrn_rf2 <- as_learner(
-  imputation_pipeline %>>%
-    po("encode",  method = "one-hot") %>>%
-    lrn("regr.ranger",
-        num.trees = to_tune(50, 200),
-        min.node.size = to_tune(1, 10),
-        mtry = to_tune(1, 8)
+## XGBoost Model -----------------------------------------------------------------
+# learner
+lrn_xgboost1 <- as_learner(
+  po("encode",  method = "one-hot") %>>%
+    lrn("regr.xgboost",
+        eta = to_tune(1e-4, 1, logscale =TRUE),
+        max_depth = to_tune(1, 10),
+        colsample_bytree = to_tune(1e-1, 1),
+        colsample_bylevel = to_tune(1e-1, 1),
+        lambda = to_tune(1e-3, 1e3, logscale =TRUE),
+        alpha = to_tune(1e-3, 1e3, logscale =TRUE),
+        subsample = to_tune(1e-1, 1)
     )
 )
 
-at_rf2 <- auto_tuner(
-  learner = lrn_rf2,
-  resampling = rsmp("cv", folds = 5),       
-  measure = msr("regr.rmse"),               
-  tuner = tnr("grid_search"),            
-  terminator = trm("evals", n_evals = 20)   
+# 5-fold cv
+resampling1 <- rsmp("cv", folds = 5)
+# terminate at 5 evals 
+terminator1 <- trm("evals", n_evals = 5)
+# grid search tuner
+tuner_gs = tnr("grid_search")
+
+#auto tuner 
+at_xgboost1 <- auto_tuner(
+  learner = lrn_xgboost1,
+  resampling = resampling1,
+  measure = msr("regr.rmse"), # evaluate by the rmse value
+  terminator = terminator1, 
+  tuner = tuner_gs
 )
 
-# train model
-at_rf2$train(task = housing_tsk, row_ids = train_idx)
-best_params <- at_rf2$tuning_result
+# train the model 
+# commented out the below lines to prevent knitting from taking too long
+# we extracted the best parameters and made a duplicate model with the best paramters set 
+# at_xgboost1$train(housing_tsk, row_ids = train_idx)
+# store the best parameters 
+# best_param1 <- at_xgboost1$tuning_result
 
-# test model
-preds5 <- lrn_rf2$predict(housing_tsk, row_ids = test_idx)
-preds5$score(measures)
+tuned_lrn_xgboost1 <- as_learner(
+  po("encode",  method = "one-hot") %>>%
+    lrn("regr.xgboost",
+        eta = exp(-5.116856),
+        max_depth = 3,
+        colsample_bytree = 0.8,
+        colsample_bylevel = 0.6,
+        lambda = exp(3.837642),
+        alpha = exp(-0.7675284),
+        subsample = 1
+    )
+)
+
+# train the model
+set.seed(101)
+tuned_lrn_xgboost1$train(housing_tsk, row_ids = train_idx)
+# predict on train indecies 
+preds1 <- tuned_lrn_xgboost1$predict(housing_tsk, row_ids = test_idx)
+# obtain score
+preds1$score(measures)
+# regr.rmse  regr.mse 
+#  1.078237  1.162595
+
+## code to create predictions on the 2000 observations of test data
+# test_predict2 <- at_xgboost1$predict_newdata(test_data)
+# testing2 <- test_predict2$response
+# testing2 <- round(testing2)
+
+# extract variable importance
+importance_scores <- at_xgboost1$learner$importance()
+# variable importance plot
+ggplot(data = data.frame(var = names(importance_scores),
+                          value = importance_scores
+                        ) |>
+  dplyr::arrange(desc(value)) |>
+  dplyr::slice(1:15)
+) + ggtitle("XGBoost Model Top 15 Variable Importance Plot") + 
+  geom_point(aes(x = value, y = reorder(var, value))) +
+ylab("variable") + xlab("importance") 
+
+## Random Forest Model 1 -----------------------------------------------------------------
+## manually changed the parameters to reduce time waiting to tune the model 
+lrn_rf1 <- lrn(
+  "regr.ranger",
+  num.trees       = 618,
+  mtry            = 4,
+  min.node.size   = 11,
+  sample.fraction = 0.8449092,
+  importance      = "impurity"
+)
+
+## train the model 
+set.seed(101)
+lrn_rf1$train(housing_tsk, row_ids = train_idx)
+## predict on test indicies 
+preds2 <- lrn_rf1$predict(housing_tsk, row_ids = test_idx)
+preds2$score(measures)
+# regr.rmse  regr.mse 
+#  1.074993  1.155609 
+
+# getting importance values
+importance <- lrn_rf1$importance()
+class(importance) # should be "numeric"
+str(importance)
+
+# importance values as a dataframe for plotting
+vip_df <- data.frame(
+  variable = names(importance),
+  importance = as.numeric(importance)
+)
+
+# sort by importance, descending
+vip_df <- vip_df[order(-vip_df$importance), ]
+# plot 
+ggplot(vip_df[1:15, ], 
+  aes(x = reorder(variable, importance), y = importance)) + 
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(
+    title = "Top 15 Most Important Variables (Random Forest)",
+    x = "Predictor",
+    y = "Impurity-based Importance"
+  ) +
+    theme_minimal()
+
+## NEW DATA VARIABLES -----------------------------------------------------------------
+load("processed_data_train.RData")
+train_data <- train_data[ , !(names(train_data) %in% c("survey.response.id", 
+                                                       "shipping.address.state", 
+                                                       "q.demos.gender", 
+                                                       "q.demos.state")) ]
+
+load("processed_data_test2.RData")
+ids <- test_data$survey.response.id
+test_data <- test_data[ , !(names(test_data) %in% c("survey.response.id", 
+                                                    "shipping.address.state", 
+                                                    "q.demos.gender", 
+                                                    "q.demos.state")) ]
+
+# defining the task
+housing_tsk <- as_task_regr(train_data, target = "q.amazon.use.hh.size.num")
+
+## spliting training and test data
+set.seed(101)
+split <- partition(housing_tsk, ratio = 0.8)
+train_idx <- split$train
+test_idx  <- split$test
+
+# measures
+measures <- list(msr("regr.rmse"), msr("regr.mse"))
+
+## Random Forest Model 2 -----------------------------------------------------------------
+
+## comparing  -----------------------------------------------------------------
+learners_to_compare <- list(
+  tuned_lrn_xgboost1,
+  lrn_rf1
+)
+
+rsmp_cv5 <- rsmp("cv", folds = 5)
+
+bmr_design <- benchmark_grid(
+  tasks = housing_tsk,
+  learners = learners_to_compare,
+  resamplings = rsmp_cv5
+)
+
+# running the actual benchmark experiment 
+set.seed(101)
+bmr <- benchmark(design = bmr_design)
+bmr_rmse <- bmr$aggregate(measures = msr("regr.rmse"))[, c("learner_id", "regr.rmse")]
+bmr_rmse[, c("learner_id", "regr.rmse")]
+
+# visualizing benchmark results 
+autoplot(bmr) + scale_y_log10()
