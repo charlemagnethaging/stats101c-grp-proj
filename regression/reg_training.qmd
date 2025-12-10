@@ -563,6 +563,8 @@ write_csv(sub_3_df, "submissions/charlie_submission_3.csv")
 
 ## Random Forest tuning
 
+### rf_tune1
+
 ```{r}
 #| label: rf_tune_1
 
@@ -598,6 +600,7 @@ plan(list(
 ))
 
 # tune
+tuner_rs <- tnr("random_search")
 tuner_rs$optimize(instance_rf)
 
 tune_rf <- lrn_rf$clone()
@@ -643,6 +646,98 @@ sub_4_df <- cbind(tsk_hhsize_test$row_names, sub_4$response) |>
 
 write_csv(sub_4_df, "submissions/charlie_submission_4.csv")
 ```
+
+### rf_tune2
+
+```{r}
+#| label: rf_tune_2
+
+lrn_rf <- as_learner(
+  # po("encode", method = "one-hot") %>>% try no encoding?
+  lrn("regr.ranger",
+      splitrule = "extratrees",
+      respect.unordered.factors = "order", # internal encoding
+      num.trees = 600, 
+      
+      mtry.ratio = to_tune(0.1, 1), 
+      
+      min.node.size = to_tune(1, 20),
+      
+      sample.fraction = to_tune(0.5, 1),
+      importance = "impurity"
+  )
+)
+
+instance_rf <- ti(
+  task = tsk_hhsize,
+  learner = lrn_rf,
+  resampling = rsmp("cv", folds = 3),
+  measure = msr("regr.rmse"),
+  terminator = trm("evals", n_evals = 60)
+)
+
+set.seed(13)
+plan(list(
+  tweak("multisession", workers=3),
+  tweak("multisession", workers=3)
+))
+
+# tune
+tuner_rs$optimize(instance_rf)
+
+tune_rf2 <- lrn_rf$clone()
+tune_rf2$param_set$values <- instance_rf$result_learner_param_vals
+
+hhsize_split <- partition(tsk_hhsize, ratio=0.8)
+tune_rf2$train(tsk_hhsize, row_ids = hhsize_split$train)
+preds <- tune_rf2$predict(tsk_hhsize, row_ids = hhsize_split$test)
+
+preds$score(c(msr("regr.rmse"), msr("regr.mae")))
+```
+
+> instance_rf$result_learner_param_vals
+$importance
+[1] "impurity"
+
+$num.threads
+[1] 1
+
+$num.trees
+[1] 600
+
+$respect.unordered.factors
+[1] "order"
+
+$sigma2.threshold
+[1] 0.01
+
+$splitrule
+[1] "extratrees"
+
+$min.node.size
+[1] 12
+
+$mtry.ratio
+[1] 0.4580424
+
+$sample.fraction
+[1] 0.5361195
+
+```{r}
+load("processed_data_test.RData")
+tsk_hhsize_test <- as_task_regr(test_data, target = "q.amazon.use.hh.size.num", id="hh_size_test")
+tsk_hhsize_test$set_col_roles("survey.response.id", "name")
+sub_5 <- tune_rf2$predict(tsk_hhsize_test)
+sub_5_df <- cbind(tsk_hhsize_test$row_names, sub_5$response) |> 
+  as_tibble() |> 
+  select(!row_id) |> 
+  # mutate(V2 = round(V2)) |> don't round?
+  rename(Survey.ResponseID = row_name, Q.amazon.use.hh.size.num = V2)
+
+write_csv(sub_5_df, "submissions/charlie_submission_5.csv")
+```
+
+## Benchmarking
 
 ```{r}
 #| label: benchmark
