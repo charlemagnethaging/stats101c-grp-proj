@@ -11,7 +11,7 @@ output:
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-# 1) XGBoost Tuned Hyperparameters 2
+# 1) XGBoost Tuned Hyperparameters Attempt 2 (NOT BEING USED)
 ```{r}
 eta = exp(-4.31926)
 max_depth = 6
@@ -22,7 +22,7 @@ alpha = exp(-0.9691479)
 subsample = 0.6763495	
 ```
 
-XGBoost Tuned Hyper parameters 3
+XGBoost Tuned Hyper parameters 3 (BEST RESULT)
 ```{r}
 params <- readRDS("xgb_best_params1.rds")
 eta = exp(-2.69948)
@@ -115,7 +115,8 @@ lrn_xgboost$train(tsk_train)
 #4 Evaluation
 
 ```{r}
-# Since there is no Cancer column in the test data set, I will add it so that my task can have it as a target
+# Since there is no Cancer column in the test data set, 
+#I will add it so that my task can have it as a target
 test$Cancer <- factor(NA, levels = c("Benign", "Malignant"))
 tsk_test <- as_task_classif(test, target = "Cancer")
 

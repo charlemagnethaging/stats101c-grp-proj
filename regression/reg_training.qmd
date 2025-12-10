@@ -1,0 +1,666 @@
+---
+title: 'Reg Model Fitting'
+format: 'html'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+library(tidyverse)
+library(rpart)
+library(mlr3verse)
+library(xgboost)
+library(broom)
+library(glmnet)
+library(stringr)
+library(future)
+```
+
+# Factor Encoding Pipeline
+
+```{r}
+load("processed_data_train.RData")
+data <- train_data |> select(-survey.response.id)
+tsk_hhsize <- as_task_regr(data, target = "q.amazon.use.hh.size.num", id="amazon_hh_size")
+
+factor_pipeline <- 
+  po("collapsefactors", # collapse levels occuring less than 1% in data
+      no_collapse_above_prevalence = 0.01) %>>% 
+  po("encodeimpact", # impact encoding factors with > 10 lvls
+      affect_columns = selector_cardinality_greater_than(10),
+      id="high_card_enc") %>>%
+  po("encode", method = "one-hot", id="low_card_enc") # one-hot encode low card. features
+
+```
+
+# Feature Selection
+
+## Filter Methods + Recursive Feature Elimination
+
+```{r}
+## choose filters
+# install.packages("FSelectorRcpp")
+flt_gain <- flt("gain_ratio")
+flt_gain$calculate(tsk_hhsize)
+as.data.table(flt_gain) # so much variability in state cols that it kills info gain of all other numeric vars
+
+# install.packages("praznik")
+flt_jmim <- flt("jmim")
+flt_jmim$calculate(tsk_hhsize, nfeat = 30)
+as.data.table(flt_jmim)
+
+lrn_xgb <- lrn(
+      "regr.xgboost", 
+			nrounds = 1000,
+			early_stopping_rounds = 20,
+      validate="predefined"
+      )
+
+glrn_xgb_enc <- as_learner(factor_pipeline %>>% lrn_xgb)
+glrn_xgb_enc$validate <- 0.2
+
+
+# seems like a promising method but idk how to interpret it
+# flt_permutation <- flt("permutation", learner = lrn_xgb, measure = msr("regr.rmse"), resampling = rsmp("cv", folds = 3), nmc=2)
+# flt_permutation$calculate(tsk_hhsize)
+# as.data.table(flt_permutation)
+
+# recursive feature elimination using mlr3 (Ch 6)
+
+instance <- fsi(
+	task = tsk_hhsize,
+	learner = glrn_xgb_enc,
+	resampling = rsmp("cv", folds = 5),
+	measure = msr("regr.rmse"),
+	terminator = trm("none")
+)
+
+fselector <- fs("rfe") # recursive feature selection: eliminates lowest importance
+fselector$optimize(instance)
+
+setdiff(tsk_hhsize$feature_names, instance$result_feature_set)
+as.data.table(instance$archive) # optimization plateau...
+```
+
+## xgb importance plot
+
+```{r}
+#| label: xgb_importance
+glrn_xgb_enc$train(tsk_hhsize)
+as_tibble(glrn_xgb_enc$importance(), rownames="var") |> ggplot() + 
+  geom_point(aes(y = reorder(var, value), x = value))
+```
+
+# Model Fitting
+
+## Lasso
+
+```{r}
+#| label: lasso
+
+lrn_lasso <- lrn("regr.cv_glmnet", 
+  alpha = 1, 
+  nfolds = 10, 
+  s = "lambda.min", 
+  standardize = TRUE
+)
+lrn_lasso_encode <- as_learner(factor_pipeline %>>% lrn_lasso)
+
+lrn_lasso_encode$train(tsk_hhsize)
+
+lrn_lasso_encode$model$regr.cv_glmnet$model
+coef(lrn_lasso_encode$model$regr.cv_glmnet$model)
+```
+
+## Simple Reg. Tree
+
+```{r}
+#| label: regtree
+lrn_rpart <- as_learner(factor_pipeline %>>% lrn("regr.rpart")) 
+lrn_rpart$train(tsk_hhsize)
+lrn_rpart$model$regr.rpart$model |> rpart.plot::rpart.plot()
+
+## tuning
+lrn_rpart <- lrn("regr.rpart", 
+                  maxdepth=to_tune(),
+                  minsplit=to_tune(2,100)
+)
+# lrn("regr.rpart")$param_set
+
+glrn_rpart_enc <- as_learner(factor_pipeline %>>% lrn_rpart)
+
+instance <- ti(
+  task = tsk_hhsize,
+  learner = glrn_rpart_enc,
+  resampling = rsmp("cv", folds = 5),
+  measure = msr("regr.rmse"),
+  terminator = trm("none")
+)
+
+set.seed(13)
+plan(list(
+  tweak("multisession", workers=3),
+  tweak("multisession", workers=3)
+))
+tuner <- tnr("grid_search", resolution = 10)
+tuner$optimize(instance)
+
+autoplot(instance)
+
+```
+
+## XGBoost tuning
+
+### xgb_tune_1
+
+```{r}
+## auto-tuning hps
+
+lrn_xgb <- as_learner(
+	factor_pipeline %>>%
+		lrn(
+			"regr.xgboost",
+      nrounds = 1000,
+      early_stopping_rounds = 20,
+      validate="predefined",
+
+			eta = to_tune(1e-4, 1),
+			max_depth = to_tune(4, 20),
+			colsample_bytree = to_tune(1e-1, 1),
+			lambda = to_tune(1e-4, 1e2, logscale = TRUE),
+			alpha = to_tune(1e-4, 1e2, logscale = TRUE),
+			subsample = to_tune(0.2,0.8)
+		)
+)
+lrn_xgb$validate <- 0.2
+
+instance = ti(
+  task = tsk_hhsize,
+  learner = lrn_xgb,
+  resampling = rsmp("cv", folds = 3),
+  measure = msr("regr.rmse"),
+  terminator = trm("evals", n_evals = 200) 
+)
+
+# parallelize
+set.seed(13)
+plan(list(
+  tweak("multisession", workers=3),
+  tweak("multisession", workers=3)
+))
+
+# tune
+tuner_rs <- tnr("random_search")
+tuner_rs$optimize(instance)
+
+# extract best params, fit and train final model
+best_params <- instance$result_learner_param_vals
+# print(instance$result)
+instance$result$format
+```
+
+regr.xgboost.alpha regr.xgboost.colsample_bytree regr.xgboost.eta regr.xgboost.lambda regr.xgboost.max_depth 
+         -4.694589                      0.757059       0.05605636           -2.122034                      5
+regr.xgboost.subsample learner_param_vals  x_domain regr.rmse
+              0.649787         <list[17]> <list[6]>  1.061129
+
+```{r}
+xgb_tune1 <- lrn_xgb$clone()
+xgb_tune1$param_set$values <- best_params
+
+hhsize_split <- partition(tsk_hhsize, ratio=0.8) 
+xgb_tune1$train(tsk_hhsize, row_ids = hhsize_split$train)
+
+# evaluate on test set
+
+preds <- xgb_tune1$predict(tsk_hhsize, row_ids = hhsize_split$test)
+preds$score(c(msr("regr.rmse"), msr("regr.mae")))
+
+# round results and check accuracy
+pred_df <- as.data.table(preds)
+ggplot(pred_df, aes(x = truth, y = response)) +
+  geom_jitter(alpha = 0.3, width = 0.2) + # Jitter helps see density for integers
+  geom_abline(color = "red", linetype = "dashed") +
+  labs(title = "Actual vs Predicted Household Size",
+       x = "Actual Size (Truth)",
+       y = "Predicted Size (Response)") +
+  theme_minimal()
+
+mean(preds$truth == round(preds$response))
+# [1] 0.2842975
+```
+
+### xgb_tune_2
+
+change optimization target to median (by using mean absolute error over rmse)
+
+```{r}
+lrn_xgb <- as_learner(
+  factor_pipeline %>>%
+    lrn(
+      "regr.xgboost",
+      objective = "reg:absoluteerror", # changed here
+      nrounds = 1000,
+      early_stopping_rounds = 20,
+      validate="predefined",
+      
+      # tuning space #2
+      eta = to_tune(1e-3, 0.3, logscale = TRUE), 
+      max_depth = to_tune(3, 10),                
+      colsample_bytree = to_tune(0.5, 1),       
+      subsample = to_tune(0.5, 1),
+      lambda = to_tune(1e-3, 10, logscale = TRUE),
+      alpha = to_tune(1e-3, 10, logscale = TRUE)
+    )
+)
+lrn_xgb$validate <- 0.2
+
+# # drop bad features using init. importance plot as guide
+# bad_features <- c("q.demos.gender")
+# keep_features <- setdiff(tsk_hhsize$feature_names, bad_features)
+
+# tsk_hhsize$select(keep_features)
+
+set.seed(13)
+
+instance = ti(
+  task = tsk_hhsize,
+  learner = lrn_xgb,
+  resampling = rsmp("cv", folds = 3),
+  measure = msr("regr.mae"),
+  terminator = trm("evals", n_evals = 100) 
+)
+
+# tune
+tuner_rs <- tnr("random_search")
+tuner_rs$optimize(instance)
+instance$result_learner_param_vals
+# extract best params, fit and train final model
+best_params <- instance$result_learner_param_vals
+```
+
+regr.xgboost.alpha regr.xgboost.colsample_bytree regr.xgboost.eta regr.xgboost.lambda regr.xgboost.max_depth 
+        0.04670436                     0.7762974       0.03012616           0.3100064                      3 
+regr.xgboost.subsample learner_param_vals  x_domain  regr.mae
+             0.7480828         <list[18]> <list[6]> 0.8714266
+
+
+```{r}
+xgb_tune2 <- lrn_xgb$clone()
+xgb_tune2$param_set$values <- best_params
+
+hhsize_split <- partition(tsk_hhsize, ratio=0.7) 
+xgb_tune2$train(tsk_hhsize, row_ids = hhsize_split$train)
+
+# evaluate on test set
+
+preds <- xgb_tune2$predict(tsk_hhsize, row_ids = hhsize_split$test)
+preds$score(c(msr("regr.rmse"), msr("regr.mae")))
+
+# round results and check accuracy
+pred_df <- as.data.table(preds)
+ggplot(pred_df, aes(x = truth, y = response)) +
+  geom_jitter(alpha = 0.3, width = 0.2) + # Jitter helps see density for integers
+  geom_abline(color = "red", linetype = "dashed") +
+  labs(title = "Actual vs Predicted Household Size",
+       x = "Actual Size (Truth)",
+       y = "Predicted Size (Response)") +
+  theme_minimal()
+
+mean(preds$truth == round(preds$response))
+
+# it's still pretty bad. but better!
+xgb_tune2$importance()
+```
+
+```{r}
+#| label: submission_1
+
+load("processed_data_test.RData")
+tsk_hhsize_test <- as_task_regr(test_data, target = "q.amazon.use.hh.size.num", id="hh_size_test")
+tsk_hhsize_test$set_col_roles("survey.response.id", "name")
+tsk_hhsize_test$row_names
+
+# train on entire train set first
+xgb_tune2$train(tsk_hhsize)
+submission_1 <- xgb_tune2$predict(tsk_hhsize_test)
+sub_1_df <- cbind(tsk_hhsize_test$row_names, submission_1$response) |> 
+  as_tibble() |> 
+  select(!row_id) |> 
+  mutate(V2 = round(V2)) |> 
+  rename(Survey.ResponseID = row_name, Q.amazon.use.hh.size.num = V2)
+
+write_csv(sub_1_df, "submissions/charlie_submission_1.csv")
+```
+
+### xgb_tune_3
+
+```{r}
+ft_importance <- as_tibble(xgb_tune2$importance(), rownames="ft_name")
+keep_features <- ft_importance |> filter(value >= 0.01) |> pull(ft_name)
+# aggressive feature dropping
+tsk_hhsize$select(keep_features)
+
+# retune for new feature subset
+lrn_xgb <- as_learner(
+  factor_pipeline %>>%
+    lrn(
+      "regr.xgboost",
+      objective = "reg:absoluteerror", # changed here
+      nrounds = 1000,
+      early_stopping_rounds = 20,
+      validate="predefined",
+      
+      # tuning space #2
+      eta = to_tune(1e-3, 0.3, logscale = TRUE), 
+      max_depth = to_tune(3, 10),                
+      colsample_bytree = to_tune(0.5, 1),       
+      subsample = to_tune(0.5, 1),
+      lambda = to_tune(1e-3, 10, logscale = TRUE),
+      alpha = to_tune(1e-3, 10, logscale = TRUE)
+    )
+)
+lrn_xgb$validate <- 0.2
+
+set.seed(13)
+plan(list(
+  tweak("multisession", workers=3),
+  tweak("multisession", workers=3)
+))
+instance = ti(
+  task = tsk_hhsize,
+  learner = lrn_xgb,
+  resampling = rsmp("cv", folds = 3),
+  measure = msr("regr.mae"),
+  terminator = trm("evals", n_evals = 300) 
+)
+
+# tune
+tuner_rs <- tnr("random_search")
+tuner_rs$optimize(instance)
+
+# extract best params, fit and train final model
+best_params <- instance$result_learner_param_vals
+xgb_tune3 <- lrn_xgb$clone()
+xgb_tune3$param_set$values <- best_params
+
+hhsize_split <- partition(tsk_hhsize, ratio=0.8) 
+xgb_tune3$train(tsk_hhsize, row_ids = hhsize_split$train)
+
+# evaluate on test set
+
+preds <- xgb_tune3$predict(tsk_hhsize, row_ids = hhsize_split$test)
+preds$score(c(msr("regr.rmse"), msr("regr.mae")))
+
+mean(round(preds$response) == preds$truth)
+xgb_tune3$param_set$values
+
+
+```
+
+Submission 2:
+$regr.xgboost.alpha
+[1] 0.003483568
+
+$regr.xgboost.colsample_bytree
+[1] 0.9807904
+
+$regr.xgboost.early_stopping_rounds
+[1] 20
+
+$regr.xgboost.eta
+[1] 0.006312626
+
+$regr.xgboost.lambda
+[1] 0.04124672
+
+$regr.xgboost.max_depth
+[1] 3
+
+$regr.xgboost.nrounds
+[1] 1000
+
+$regr.xgboost.nthread
+[1] 1
+
+$regr.xgboost.objective
+[1] "reg:absoluteerror"
+
+$regr.xgboost.subsample
+[1] 0.9755713
+
+keep_features:
+spend_Toys_and_Hobbies, freq_Baby_Product, freq_Toys_and_Hobbies, total.orders, freq_Household_Essentials, freq_Beauty_and_Personal_Care, spend_Baby_Product, freq_Other, freq_Kitchen_and_Dining, freq_DIY_Auto_and_Lighting, freq_Grocery_and_Food, freq_Pet_Supplies, freq_Books_and_Media, q.demos.state, freq_Office_and_School, spend_Pet_Supplies, freq_Electronics_and_Computers, freq_Sports_and_Outdoors, freq_Home_Decor_and_Furniture, freq_Apparel_and_Accessories, total.spent, spend_DIY_Auto_and_Lighting, shipping.address.state, avg.order.price, spend_Kitchen_and_Dining, spend_Grocery_and_Food, spend_Beauty_and_Personal_Care, freq_Health_and_Medical, spend_Books_and_Media, spend_Video_Games, spend_Garden_and_Outdoor, freq_Unknown, freq_Arts_and_Crafts, freq_Video_Games
+
+```{r}
+xgb_tune3$train(tsk_hhsize$select(keep_features))
+submission_2 <- xgb_tune3$predict(tsk_hhsize_test$select(keep_features))
+sub_2_df <- cbind(tsk_hhsize_test$row_names, submission_2$response) |> 
+  as_tibble() |> 
+  select(!row_id) |> 
+  mutate(V2 = round(V2)) |> 
+  rename(Survey.ResponseID = row_name, Q.amazon.use.hh.size.num = V2)
+
+write_csv(sub_2_df, "submissions/charlie_submission_2.csv")
+```
+
+### xgb_tune_4
+try one-hot instead of impact encoding
+```{r}
+# reset features
+load("processed_data_train.RData")
+data <- train_data |> select(-survey.response.id)
+tsk_hhsize <- as_task_regr(data, target = "q.amazon.use.hh.size.num", id="amazon_hh_size")
+
+
+lrn_xgb <- as_learner(
+	po("encode", method = "one-hot") %>>%
+		lrn(
+			"regr.xgboost",
+			objective = "reg:absoluteerror", # changed here
+			nrounds = 1000,
+			early_stopping_rounds = 20,
+			validate = "predefined",
+
+			# tuning space #2
+			eta = to_tune(1e-4, 1, logscale = TRUE),
+			max_depth = to_tune(1, 15),
+			colsample_bytree = to_tune(0.1, 1),
+			subsample = to_tune(0.1, 1),
+			lambda = to_tune(1e-3, 1e3, logscale = TRUE),
+			alpha = to_tune(1e-3, 1e3, logscale = TRUE)
+		)
+)
+lrn_xgb$validate <- 0.2
+
+set.seed(13)
+plan(list(
+	tweak("multisession", workers = 3),
+	tweak("multisession", workers = 3)
+))
+
+instance = ti(
+	task = tsk_hhsize,
+	learner = lrn_xgb,
+	resampling = rsmp("cv", folds = 3),
+	measure = msr("regr.mae"),
+	terminator = trm("evals", n_evals = 100)
+)
+
+tuner_rs$optimize(instance)
+
+# extract best params, fit and train final model
+best_params <- instance$result_learner_param_vals
+xgb_tune4 <- lrn_xgb$clone()
+xgb_tune4$param_set$values <- best_params
+
+hhsize_split <- partition(tsk_hhsize, ratio=0.8) 
+xgb_tune4$train(tsk_hhsize, row_ids = hhsize_split$train)
+
+# var importance plot sanity check
+as_tibble(xgb_tune4$importance(), rownames="var") |> ggplot() + 
+  geom_point(aes(y = reorder(var, value), x = value))
+
+# evaluate on test set
+
+preds <- xgb_tune4$predict(tsk_hhsize, row_ids = hhsize_split$test)
+preds$score(c(msr("regr.rmse"), msr("regr.mae")))
+
+mean(round(preds$response) == preds$truth)
+xgb_tune4$param_set$values
+```
+
+> xgb_tune4$param_set$values
+$encode.method
+[1] "one-hot"
+
+$regr.xgboost.alpha
+[1] 0.3191804
+
+$regr.xgboost.colsample_bytree
+[1] 0.5973353
+
+$regr.xgboost.early_stopping_rounds
+[1] 20
+
+$regr.xgboost.eta
+[1] 0.02444362
+
+$regr.xgboost.lambda
+[1] 5.458281
+
+$regr.xgboost.max_depth
+[1] 2
+
+$regr.xgboost.nrounds
+[1] 1000
+
+$regr.xgboost.nthread
+[1] 1
+
+$regr.xgboost.objective
+[1] "reg:absoluteerror"
+
+$regr.xgboost.subsample
+[1] 0.546549
+
+keep_features: all
+
+```{r}
+load("processed_data_test.RData")
+tsk_hhsize_test <- as_task_regr(test_data, target = "q.amazon.use.hh.size.num", id="hh_size_test")
+tsk_hhsize_test$set_col_roles("survey.response.id", "name")
+
+xgb_tune4$train(tsk_hhsize)
+sub_3 <- xgb_tune4$predict(tsk_hhsize_test)
+sub_3_df <- cbind(tsk_hhsize_test$row_names, sub_3$response) |> 
+  as_tibble() |> 
+  select(!row_id) |> 
+  mutate(V2 = round(V2)) |> 
+  rename(Survey.ResponseID = row_name, Q.amazon.use.hh.size.num = V2)
+
+write_csv(sub_3_df, "submissions/charlie_submission_3.csv")
+```
+
+## Random Forest tuning
+
+```{r}
+#| label: rf_tune_1
+
+lrn_rf <- as_learner(
+  po("encode", method = "one-hot") %>>%
+  lrn("regr.ranger",
+      num.trees = 500, # Standard starting point
+      
+      # Tuning Space for Random Forest
+      # mtry: Number of variables to consider at each split (Crucial for OHE)
+      mtry.ratio = to_tune(0.1, 1), 
+      
+      # min.node.size: Controls depth/overfitting (Higher = simpler trees)
+      min.node.size = to_tune(1, 20),
+      
+      # sample.fraction: How much data to use for each tree
+      sample.fraction = to_tune(0.5, 1)
+  )
+)
+
+instance_rf <- ti(
+  task = tsk_hhsize,
+  learner = lrn_rf,
+  resampling = rsmp("cv", folds = 3),
+  measure = msr("regr.mae"),
+  terminator = trm("evals", n_evals = 60)
+)
+
+set.seed(13)
+plan(list(
+  tweak("multisession", workers=3),
+  tweak("multisession", workers=3)
+))
+
+# tune
+tuner_rs$optimize(instance_rf)
+
+tune_rf <- lrn_rf$clone()
+tune_rf$param_set$values <- instance_rf$result_learner_param_vals
+
+tune_rf$train(tsk_hhsize, row_ids = hhsize_split$train)
+preds <- tune_rf$predict(tsk_hhsize, row_ids = hhsize_split$test)
+
+preds$score(c(msr("regr.rmse"), msr("regr.mae")))
+
+mean(round(preds$response) == preds$truth)
+```
+
+> instance_rf$result_learner_param_vals
+$encode.method
+[1] "one-hot"
+
+$regr.ranger.num.threads
+[1] 1
+
+$regr.ranger.num.trees
+[1] 500
+
+$regr.ranger.sigma2.threshold
+[1] 0.01
+
+$regr.ranger.min.node.size
+[1] 20
+
+$regr.ranger.mtry.ratio
+[1] 0.7636956
+
+$regr.ranger.sample.fraction
+[1] 0.528398
+
+```{r}
+sub_4 <- tune_rf$predict(tsk_hhsize_test)
+sub_4_df <- cbind(tsk_hhsize_test$row_names, sub_4$response) |> 
+  as_tibble() |> 
+  select(!row_id) |> 
+  mutate(V2 = round(V2)) |> 
+  rename(Survey.ResponseID = row_name, Q.amazon.use.hh.size.num = V2)
+
+write_csv(sub_4_df, "submissions/charlie_submission_4.csv")
+```
+
+```{r}
+#| label: benchmark
+
+# test on unseen data comparing to featureless + lasso with benchmark
+set.seed(13)
+cv_5fold <- rsmp("cv", folds = 5)
+
+learners <- list(lrn("regr.featureless"), lrn_lasso_cv, lrn_rpart, lrn_xgb)
+
+bmr_design <- benchmark_grid(tasks = tsk_hhsize, learners = learners, cv_5fold)
+bmr_design
+bmr <- benchmark(bmr_design)
+bmr$aggregate(measures = msrs(c("regr.mse", "regr.rmse")))
+
+# here, xgb does worst... clearly we need to do some tuning
+```
+
+
+
+## GAM fitting
