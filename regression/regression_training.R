@@ -12,6 +12,7 @@ library(glmnet)
 library(ranger)  # backend for regr.ranger (usually pulled in by mlr3learners, but safe)
 library(DALEX)
 library(iml)
+library(future)
 
 load("processed_data_train.RData")  # this should create train_data
 train_data <- train_data[ , !(names(train_data) %in% c("survey.response.id",
@@ -294,7 +295,9 @@ xgb_tune4 <- as_learner(
 )
 
 set.seed(13)
-hhsize_split <- partition(tsk_hhsize, ratio=0.7) 
+hhsize_split <- partition(tsk_hhsize, ratio=0.7)
+train_idx2 <- hhsize_split$train
+test_id2  <- hhsize_split$test
 xgb_tune4$train(tsk_hhsize, row_ids = hhsize_split$train)
 
 # var importance plot sanity check
@@ -308,6 +311,16 @@ preds$score(c(msr("regr.rmse"), msr("regr.mae"),  msr("regr.mse")))
 # 1.0438824 0.8887537 1.0896904 
 
 # lime visuals
+X_test <- tsk_hhsize$data(
+  rows = test_id2,
+  cols = tsk_hhsize$feature_names
+)
+
+y_test <- tsk_hhsize$data(
+  rows = test_id2,
+  cols = tsk_hhsize$target_names
+)[[1]]
+
 predictor <- Predictor$new(
   model = xgb_tune4,
   data  = X_test,
