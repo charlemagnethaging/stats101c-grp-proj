@@ -16,10 +16,19 @@ embed-resources: true
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width=7, fig.height=5)
 library(tidyverse)
 library(rpart)
+library(mlr3)
+library(mlr3learners)
 library(mlr3verse)
+library(mlr3pipelines)
+library(ggplot2)
 library(xgboost)
 library(broom)
 library(glmnet)
+library(dplyr)
+library(ranger)  # backend for regr.ranger (usually pulled in by mlr3learners, but safe)
+library(DALEX)
+library(iml)
+library(future)
 ```
 
 ```{r}
@@ -59,15 +68,71 @@ ggplot(data, aes(x = q.amazon.use.hh.size.num, fill=q.amazon.use.hh.size.num, gr
 Just looking at the distribution of housing sizes, we see that it's most common for households to have a size of 2, with size 4+ or 1 the second most frequent, and a size of 3 having the lowest frequency. Since household sizes of 4 and more are represented by only one variable, it's difficult to tell what the breakdown of household sizes are within that variable. 
 
 ### Numeric Variable Correlation
+```{r, fig.width=10, fig.height=6}
+# numeric variables that start with "freq"
+freq_data <- train_data %>%
+  select(where(is.numeric)) %>%
+  select(contains("freq"), q.amazon.use.hh.size.num)
+
+# correlation matrix
+cor_matrix <- cor(freq_data, use = "pairwise.complete.obs")
+
+# long format for ggplot
+cor_long <- as.data.frame(as.table(cor_matrix))
+
+ggplot(cor_long, aes(Var1, Var2, fill = Freq)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(
+    low = "darkgreen", high = "pink", mid = "white",
+    midpoint = 0, limit = c(-1,1), space = "Lab",
+    name = "Correlation"
+  ) +
+  geom_text(aes(label = round(Freq, 2)), color = "black", size = 4) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  labs(title = "Correlation Matrix Heatmap (Freq Variables)", x = "", y = "")
+``` 
 
 ```{r, fig.width=10, fig.height=6}
-numeric_data <- data |> 
-  select(where(is.numeric))
+# numeric variables that start with "spend"
+spend_data <- train_data %>%
+  select(where(is.numeric)) %>%
+  select(contains("spend"), q.amazon.use.hh.size.num)
 
-# Compute correlation matrix
+# correlation matrix
+cor_matrix <- cor(spend_data, use = "pairwise.complete.obs")
+
+# long format for ggplot
+cor_long <- as.data.frame(as.table(cor_matrix))
+
+ggplot(cor_long, aes(Var1, Var2, fill = Freq)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(
+    low = "darkgreen", high = "pink", mid = "white",
+    midpoint = 0, limit = c(-1,1), space = "Lab",
+    name = "Correlation"
+  ) +
+  geom_text(aes(label = round(Freq, 2)), color = "black", size = 4) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  labs(title = "Correlation Matrix Heatmap (Spend Variables)", x = "", y = "")
+``` 
+
+
+
+```{r, fig.width=10, fig.height=6}
+numeric_data <- train_data %>%
+  select(where(is.numeric)) %>%
+  select(
+    -contains("freq"),
+    -contains("spend"),
+    q.amazon.use.hh.size.num
+  )
+
+# correlation matrix
 cor_matrix <- cor(numeric_data, use = "pairwise.complete.obs")
 
-# Convert to long format for ggplot
+# long format for ggplot
 cor_long <- as.data.frame(as.table(cor_matrix))
 
 ggplot(cor_long, aes(Var1, Var2, fill = Freq)) +
@@ -87,7 +152,7 @@ From our correlation heat map, we notice that all the numerical variables do not
 ### Location
 
 ```{r, fig.width=10, fig.height=6}
-ggplot(data, aes(y = fct_rev(fct_infreq(shipping.address.state)))) +
+ggplot(train_data, aes(y = fct_rev(fct_infreq(shipping.address.state)))) +
 	geom_bar(fill = "#7ec17bff") +
 	labs(
 		title = "Distribution of Shipping Address",
@@ -107,13 +172,13 @@ ggplot(data, aes(y = fct_rev(fct_infreq(shipping.address.state)))) +
 # 	labs(title = "Average Housing Size by State", y = "State", x = "Mean Housing Size")
 
 # diff attempt at plotting per-state distr of hhsize
-state_order <- data %>%
+state_order <- train_data %>%
   group_by(shipping.address.state) %>%
   summarize(prop_size_1 = mean(q.amazon.use.hh.size.num == 1)) %>% 
   arrange(desc(prop_size_1)) %>%  # Use desc(prop_size_2) if you want top-to-bottom
   pull(shipping.address.state)
 
-data |> mutate(shipping.address.state = factor(shipping.address.state, levels = state_order)) |> 
+train_data |> mutate(shipping.address.state = factor(shipping.address.state, levels = state_order)) |> 
   ggplot(aes(
 		x = shipping.address.state,
 		fill = q.amazon.use.hh.size.num,
@@ -131,9 +196,8 @@ Interested in seeing if the state/location would show any noticeable patterns in
 
 ```{r}
 # plot correlated cat frequencies against hhsize
-
 ggplot(
-  data |> filter(freq_Toys_and_Hobbies > 0), 
+  train_data |> filter(freq_Toys_and_Hobbies > 0), 
   aes(x = q.amazon.use.hh.size.num, y = freq_Toys_and_Hobbies)) +
 	geom_jitter(alpha = 0.5)
 
@@ -188,55 +252,355 @@ After analyzing the average housing size by month and year, the order date varia
 # Model Evaluation and Tuning
 
 ```{r}
+train_data <- train_data[ , !(names(train_data) %in% c("survey.response.id",
+                                                       "total.orders",
+                                                       "n.distinct.categories")) ]
+train_data <- train_data %>% select(-starts_with("spend"))
+
+# store the test id values to merge into submission cv later 
+ids <- test_data$survey.response.id
+test_data <- test_data[ , !(names(test_data) %in% c("survey.response.id",
+                                                       "total.orders",
+                                                       "n.distinct.categories")) ]
+test_data <- test_data %>% select(-starts_with("spend"))
+
 # defining the task
-housing_tsk <- as_task_regr(data, target = "q.amazon.use.hh.size.num")
+housing_tsk <- as_task_regr(train_data, target = "q.amazon.use.hh.size.num")
+
+## spliting training and test data
+set.seed(101)
+split <- partition(housing_tsk, ratio = 0.8)
+train_idx <- split$train
+test_idx  <- split$test
+
+# measures
+measures <- list(msr("regr.rmse"), msr("regr.mse"))
 ```
 
+## XGBoost Model 
 ```{r, cache=TRUE}
-## 70/30 SPLIT
-
-# set seed for reproducibility
-set.seed(101) 
-
-# randomly assign 70% of observations to train and 30% to test
-split <- partition(housing_tsk, ratio = 0.70)
-
-# define learner
-lrn_lm <- as_learner(
-  imputation_pipeline %>>%
-    po("encode", method = "one-hot") %>>% ## one-hot encode our categorical variables
-    lrn("regr.lm") ## pass cleaned dataset into a linear regression model
+# learner
+lrn_xgboost1 <- as_learner(
+  po("encode",  method = "one-hot") %>>%
+    lrn("regr.xgboost",
+        eta = to_tune(1e-4, 1, logscale =TRUE),
+        max_depth = to_tune(1, 10),
+        colsample_bytree = to_tune(1e-1, 1),
+        colsample_bylevel = to_tune(1e-1, 1),
+        lambda = to_tune(1e-3, 1e3, logscale =TRUE),
+        alpha = to_tune(1e-3, 1e3, logscale =TRUE),
+        subsample = to_tune(1e-1, 1)
+    )
 )
 
-# train linear regression model on training data only
-lrn_lm$train(task = housing_tsk, row_ids = split$train)
-lrn_lm$model |> tidy()
+# 5-fold cv
+resampling1 <- rsmp("cv", folds = 5)
+# terminate at 5 evals 
+terminator1 <- trm("evals", n_evals = 5)
+# grid search tuner
+tuner_gs = tnr("grid_search")
 
-# predict test data only
-preds <- lrn_lm$predict(task = ames_tsk_small, row_ids = ames_split$test)
-
-# performance on test data
-preds$score(measures = msr("regr.mse"))
-```
-
-
-```{r, cache=TRUE}
-## K FOLD CROSS VALIDATION
-
-# resampling strategy
-cv_5fold <- rsmp("cv", folds = 5) 
-
-# defining the learner
-lrn_lm <- as_learner(
-  imputation_pipeline %>>%
-    po("encode", method = "one-hot") %>>% ## one-hot encode our categorical variables
-    lrn("regr.lm") ## pass cleaned dataset into a linear regression model
+#auto tuner 
+at_xgboost1 <- auto_tuner(
+  learner = lrn_xgboost1,
+  resampling = resampling1,
+  measure = msr("regr.rmse"), # evaluate by the rmse value
+  terminator = terminator1, 
+  tuner = tuner_gs
 )
 
-# set seed for reproducibility
-set.seed(101) 
-rr1 <- resample(task = housing_tsk, learner = lrn_lm, resampling = cv_5fold)
-rr1$aggregate(measures = msrs(c("time_train", "time_predict", "time_both", "regr.mse")))
+# train the model 
+# commented out the below lines to prevent knitting from taking too long
+# we extracted the best parameters and made a duplicate model with the best paramters set 
+# at_xgboost1$train(housing_tsk, row_ids = train_idx)
+# store the best parameters 
+# best_param1 <- at_xgboost1$tuning_result
+
+tuned_lrn_xgboost1 <- as_learner(
+  po("encode",  method = "one-hot") %>>%
+    lrn("regr.xgboost",
+        eta = exp(-5.116856),
+        max_depth = 3,
+        colsample_bytree = 0.8,
+        colsample_bylevel = 0.6,
+        lambda = exp(3.837642),
+        alpha = exp(-0.7675284),
+        subsample = 1
+    )
+)
+
+# train the model
+set.seed(101)
+tuned_lrn_xgboost1$train(housing_tsk, row_ids = train_idx)
+# predict on train indecies 
+preds1 <- tuned_lrn_xgboost1$predict(housing_tsk, row_ids = test_idx)
+# obtain score
+preds1$score(measures)
+# regr.rmse  regr.mse 
+#  1.078237  1.162595
+
+## code to create predictions on the 2000 observations of test data
+# test_predict <- tuned_lrn_xgboost1$predict_newdata(test_data)
+# testing <- test_predict$response
+
+# submit <- data.frame(ids, testing)
+# str(submit)
+# colnames(submit) <- c("Survey.ResponseID", "Q.amazon.use.hh.size.num")
+
+# library(data.table)
+# write_csv(submit, "submit.csv")
+
+# extract variable importance
+importance_scores <- tuned_lrn_xgboost1$importance()
+# variable importance plot
+ggplot(data = data.frame(var = names(importance_scores),
+                          value = importance_scores
+                        ) |>
+  dplyr::arrange(desc(value)) |>
+  dplyr::slice(1:15)
+) + ggtitle("XGBoost Model Top 15 Variable Importance Plot") + 
+  geom_point(aes(x = value, y = reorder(var, value))) +
+ylab("variable") + xlab("importance") 
+
+
+# lime visual
+X_test <- housing_tsk$data(
+  rows = test_idx,
+  cols = housing_tsk$feature_names
+)
+
+y_test <- housing_tsk$data(
+  rows = test_idx,
+  cols = housing_tsk$target_names
+)[[1]]
+
+pred_fun <- function(model, newdata) {
+  model$predict_newdata(newdata)$response
+}
+
+predictor <- Predictor$new(
+  model = tuned_lrn_xgboost1,
+  data  = X_test,
+  y     = y_test,
+  predict.function = pred_fun
+)
+
+# pick some interesting test points (rows within X_test)
+example_ids <- c(1, 20)
+
+set.seed(101)
+# see their predictions for context
+tuned_lrn_xgboost1$predict_newdata(X_test[example_ids, ])
+
+set.seed(101)
+# LocalModel = LIME-style local surrogate
+loc_1 <- LocalModel$new(predictor, x.interest = X_test[example_ids[1], ], k = 5)
+loc_2 <- LocalModel$new(predictor, x.interest = X_test[example_ids[2], ], k = 5)
+
+# plots: contribution of top features for each case
+plot(loc_1)
+plot(loc_2)
 ```
 
 
+## Random Forest Model 1 
+```{r, cache=TRUE}
+## manually changed the parameters to reduce time waiting to tune the model 
+lrn_rf1 <- lrn(
+  "regr.ranger",
+  num.trees       = 618,
+  mtry            = 4,
+  min.node.size   = 11,
+  sample.fraction = 0.8449092,
+  importance      = "impurity"
+)
+
+## train the model 
+set.seed(101)
+lrn_rf1$train(housing_tsk, row_ids = train_idx)
+## predict on test indicies 
+preds2 <- lrn_rf1$predict(housing_tsk, row_ids = test_idx)
+preds2$score(measures)
+# regr.rmse  regr.mse 
+#  1.074993  1.155609 
+
+# getting importance values
+importance <- lrn_rf1$importance()
+class(importance) # should be "numeric"
+# str(importance)
+
+# importance values as a dataframe for plotting
+vip_df <- data.frame(
+  variable = names(importance),
+  importance = as.numeric(importance)
+)
+
+# sort by importance, descending
+vip_df <- vip_df[order(-vip_df$importance), ]
+# plot 
+ggplot(vip_df[1:15, ], 
+  aes(x = reorder(variable, importance), y = importance)) + 
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(
+    title = "Top 15 Most Important Variables (Random Forest)",
+    x = "Predictor",
+    y = "Impurity-based Importance"
+  ) +
+    theme_minimal()
+
+# lime visuals
+predictor <- Predictor$new(
+  model = lrn_rf1,
+  data  = X_test,
+  y     = y_test,
+  predict.function = pred_fun
+)
+
+# pick some interesting test points (rows within X_test)
+example_ids <- c(1, 20)
+
+# see their predictions for context
+set.seed(101)
+lrn_rf1$predict_newdata(X_test[example_ids, ])
+
+set.seed(101)
+# LocalModel = LIME-style local surrogate
+loc_1 <- LocalModel$new(predictor, x.interest = X_test[example_ids[1], ], k = 5)
+loc_2 <- LocalModel$new(predictor, x.interest = X_test[example_ids[2], ], k = 5)
+
+# plots: contribution of top features for each case
+plot(loc_1)
+plot(loc_2)
+```
+
+
+## NEW DATA VARIABLES
+```{r, cache=TRUE}
+data <- train_data |> select(-survey.response.id)
+# defining the task
+tsk_hhsize <- as_task_regr(data, target = "q.amazon.use.hh.size.num", id="amazon_hh_size")
+```
+
+## Final Model: XGBoost Model 2 
+```{r, cache=TRUE}
+lrn_xgb <- as_learner(
+	po("encode", method = "one-hot") %>>%
+		lrn(
+			"regr.xgboost",
+			eta = to_tune(1e-4, 1, logscale = TRUE),
+			max_depth = to_tune(1, 15),
+			colsample_bytree = to_tune(0.1, 1),
+			subsample = to_tune(0.1, 1),
+			lambda = to_tune(1e-3, 1e3, logscale = TRUE),
+			alpha = to_tune(1e-3, 1e3, logscale = TRUE)
+		)
+)
+
+set.seed(13)
+plan(list(
+	tweak("multisession", workers = 3),
+	tweak("multisession", workers = 3)
+))
+
+instance = ti(
+	task = tsk_hhsize,
+	learner = lrn_xgb,
+	resampling = rsmp("cv", folds = 5),
+	measure = msr("regr.rmse"),
+	terminator = trm("evals", n_evals = 60)
+)
+
+## commenting the below code out to save time for knitting 
+# tuner_rs$optimize(instance)
+## extract best params, fit and train final model
+# best_params <- instance$result_learner_param_vals
+xgb_tune4 <- as_learner(
+	po("encode", method = "one-hot") %>>%
+		lrn(
+			"regr.xgboost",
+			eta = 0.007055363,
+			max_depth = 4,
+			colsample_bytree = 0.319908,
+			subsample = 0.369098,
+			lambda = exp(-1.05846993385),
+			alpha = exp(0.73788139955)
+		)
+)
+
+set.seed(13)
+hhsize_split <- partition(tsk_hhsize, ratio=0.7)
+train_idx2 <- hhsize_split$train
+test_id2  <- hhsize_split$test
+xgb_tune4$train(tsk_hhsize, row_ids = hhsize_split$train)
+
+# var importance plot sanity check
+as_tibble(xgb_tune4$importance(), rownames="var") |> ggplot() + 
+  geom_point(aes(y = reorder(var, value), x = value))
+
+# evaluate on test set
+preds <- xgb_tune4$predict(tsk_hhsize, row_ids = hhsize_split$test)
+preds$score(c(msr("regr.rmse"), msr("regr.mae"),  msr("regr.mse")))
+# regr.rmse  regr.mae  regr.mse 
+# 1.0438824 0.8887537 1.0896904 
+
+# lime visuals
+X_test <- tsk_hhsize$data(
+  rows = test_id2,
+  cols = tsk_hhsize$feature_names
+)
+
+y_test <- tsk_hhsize$data(
+  rows = test_id2,
+  cols = tsk_hhsize$target_names
+)[[1]]
+
+predictor <- Predictor$new(
+  model = xgb_tune4,
+  data  = X_test,
+  y     = y_test,
+  predict.function = pred_fun
+)
+
+# pick some interesting test points (rows within X_test)
+example_ids <- c(1, 20)
+
+# see their predictions for context
+set.seed(101)
+xgb_tune4$predict_newdata(X_test[example_ids, ])
+
+set.seed(101)
+# LocalModel = LIME-style local surrogate
+loc_1 <- LocalModel$new(predictor, x.interest = X_test[example_ids[1], ], k = 5)
+loc_2 <- LocalModel$new(predictor, x.interest = X_test[example_ids[2], ], k = 5)
+
+# plots: contribution of top features for each case
+plot(loc_1)
+plot(loc_2)
+```
+
+## comparing models w/ xgb1 
+```{r, cache=TRUE} 
+tuned_lrn_xgboost1$id <- "tuned_lrn_xgboost1"
+lrn_rf1$id <- "lrn_rf1"
+xgb_tune4$id <- "xgb_tune4"
+learners_to_compare <- list(tuned_lrn_xgboost1, lrn_rf1, lrn("regr.featureless"), xgb_tune4)
+
+rsmp_cv5 <- rsmp("cv", folds = 5)
+
+bmr_design <- benchmark_grid(
+  tasks = housing_tsk,
+  learners = learners_to_compare,
+  resamplings = rsmp_cv5
+)
+
+# running the actual benchmark experiment 
+set.seed(101)
+bmr <- benchmark(design = bmr_design)
+bmr_rmse <- bmr$aggregate(measures = msr("regr.rmse"))[, c("learner_id", "regr.rmse")]
+bmr_rmse[, c("learner_id", "regr.rmse")]
+bmr_rmse
+
+# visualizing benchmark results 
+autoplot(bmr, measure = msr("regr.rmse")) + scale_y_log10()
+```
